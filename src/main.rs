@@ -55,13 +55,15 @@ fn main() {
 		.open(&device_id)
 		.expect("error opening MIDI device");
 
-	loop {
-		let byte = device.read_byte();
-		if let Some(x) = byte {
-			println!("{}", x);
+	while device.is_connected() {
+		let maybe_event = device.read_event();
+		if let Some(event) = maybe_event {
+			println!("{:?}", event);
 		} else {
-			println!("nothing");
 			std::thread::sleep(std::time::Duration::from_millis(10));
+		}
+		if let Some(err) = device.get_error() {
+			eprintln!("Error: {}", err);
 		}
 	}
 

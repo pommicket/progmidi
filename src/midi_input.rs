@@ -1,3 +1,4 @@
+use std::ffi::{c_char, c_int, c_void, CStr, CString};
 /// Query and read from MIDI input devices.
 /// Don't assume these functions are thread-safe.
 /// You should only need to call them in the main thread anyways.
@@ -14,23 +15,20 @@
 ///      println!("{}",device.name);
 /// }
 /// let device = manager.open(&devices[i].id);
-/// loop {
-///     if let Some(byte) = device.read_byte() {
+/// while device.is_connected() {
+///     if let Some(event) = device.read_event() {
 ///         ...
 ///     } else {
 ///         std::thread::sleep(std::time::Duration::from_millis(100));
 ///     }
 /// }
 /// ```
-use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::sync::Mutex;
 // so much stuff depends on libc
 // it's not such a big deal to add it as a dependency
 // (we only really need it for size_t, ssize_t)
 extern crate libc;
-use libc::{size_t, ssize_t, free};
-
-
-use std::sync::Mutex;
+use libc::{free, size_t, ssize_t};
 
 // (snd_rawmidi_t is an opaque struct)
 type SndRawMidiT = c_void;
@@ -58,7 +56,11 @@ pub struct DeviceInfo {
 #[derive(Debug)]
 pub struct Device {
 	rawmidi: *mut SndRawMidiT,
-	error: i32
+	error: i32,
+	// used to hold first data byte of two-data-byte MIDI events.
+	buffered_byte: Option<u8>,
+	last_status: u8,
+	connected: bool
 }
 
 /// An error produced by opening a device.
@@ -74,14 +76,51 @@ pub enum DeviceOpenError {
 
 pub struct DeviceList {
 	pub devices: Vec<DeviceInfo>,
-	pub default: usize
+	pub default: usize,
 }
 
+/// A MIDI event.
+/// All notes and velocities are from 0 to 127.
+/// A note of 60 +/- n indicates n semitones above/below middle C.
+#[derive(Debug, Clone, Copy)]
+pub enum Event {
+	/// a note was pressed
+	/// This may also indicate a note off, if `vel = 0`.
+	NoteOn { channel: u8, note: u8, vel: u8 },
+	/// a note was released
+	NoteOff { channel: u8, note: u8, vel: u8 },
+	/// a change in pressure to a note
+	NoteAftertouch { channel: u8, note: u8, pressure: u8 },
+	/// a controller was changed
+	ControlChange {
+		channel: u8,
+		controller: u8,
+		value: u8,
+	},
+	/// the current program should be changed.
+	ProgramChange { channel: u8, program: u8 },
+	/// like `NoteAftertouch`, but affects all notes on this channel
+	ChannelAftertouch { channel: u8, pressure: u8 },
+	/// the pitch bend was altered.
+	/// amount ranges from `-0x2000` to `0x1fff`.
+	PitchBend { channel: u8, amount: i16 },
+	/// another event. probably doesn't matter to you.
+	/// note that if there are multiple bytes of data,
+	/// you will get multiple `Other` events: e.g.
+	/// ```
+	/// Other { status: 0xf0, data: None }
+	/// Other { status: 0xf0, data: Some(0x33) }
+	/// Other { status: 0xf0, data: Some(0x45) }
+	/// Other { status: 0xf0, data: Some(0x1a) }
+	/// ```
+	/// corresponds to the raw MIDI data `f0 33 45 1a`.
+	Other { status: u8, data: Option<u8> },
+}
 
 impl IntoIterator for DeviceList {
 	type Item = DeviceInfo;
 	type IntoIter = std::vec::IntoIter<Self::Item>;
-	
+
 	fn into_iter(self) -> Self::IntoIter {
 		self.devices.into_iter()
 	}
@@ -90,7 +129,7 @@ impl IntoIterator for DeviceList {
 impl<'a> IntoIterator for &'a DeviceList {
 	type Item = &'a DeviceInfo;
 	type IntoIter = std::slice::Iter<'a, DeviceInfo>;
-	
+
 	fn into_iter(self) -> Self::IntoIter {
 		(&self.devices).into_iter()
 	}
@@ -102,10 +141,9 @@ impl DeviceList {
 	}
 }
 
-
 impl std::ops::Index<usize> for DeviceList {
 	type Output = DeviceInfo;
-	
+
 	fn index(&self, i: usize) -> &Self::Output {
 		&self.devices[i]
 	}
@@ -248,7 +286,7 @@ impl DeviceManager {
 					},
 					name: desc_str,
 				};
-				
+
 				if has_desc && default.is_none() {
 					default = Some(idx);
 				}
@@ -265,7 +303,7 @@ impl DeviceManager {
 
 		Ok(DeviceList {
 			devices,
-			default: default.unwrap_or(0)
+			default: default.unwrap_or(0),
 		})
 	}
 
@@ -295,10 +333,15 @@ impl DeviceManager {
 				err
 			)));
 		}
-		Ok(Device { rawmidi: input, error: 0 })
+		Ok(Device {
+			rawmidi: input,
+			buffered_byte: None,
+			error: 0,
+			last_status: 0,
+			connected: true,
+		})
 	}
 }
-
 
 impl Device {
 	fn read_raw(&mut self, buffer: &mut [u8]) -> usize {
@@ -307,7 +350,14 @@ impl Device {
 			let pbuffer = &mut buffer[0] as *mut u8 as *mut c_void;
 			n = snd_rawmidi_read(self.rawmidi, pbuffer, buffer.len() as _);
 		}
-		if n < 0 {
+		if n == -11 {
+			// EAGAIN (indicates no bytes were read)
+			0
+		} else if n == -19 {
+			// ENODEV (device was disconnected)
+			self.connected = false;
+			0
+		} else if n < 0 {
 			self.error = n as _;
 			0
 		} else if (n as usize) <= buffer.len() {
@@ -320,13 +370,10 @@ impl Device {
 		}
 	}
 
-	/// Read a single byte of MIDI input, if there is any.
-	/// It's probably fine to use this instead of `read()` in most cases,
-	/// since you probably aren't getting megabytes of MIDI data per second or anything.
-	/// For simplicity, this function just returns None if a read error occurs.
-	/// Check `get_error()` if you really care.
-	#[allow(dead_code)]
-	pub fn read_byte(&mut self) -> Option<u8> {
+	// Read a single byte of MIDI input, if there is any.
+	// (not exported since you can really screw things up
+	//  by mixing this with `read_event`)
+	fn read_byte(&mut self) -> Option<u8> {
 		let mut buffer = [0u8; 1];
 		let n = self.read_raw(&mut buffer);
 		if n == 1 {
@@ -335,7 +382,14 @@ impl Device {
 			None
 		}
 	}
-
+	
+	/// returns false if the device was disconnected.
+	/// if a device is disconnected and reconnected, you need to reopen it.
+	/// (its ID should remain the same)
+	pub fn is_connected(&self) -> bool {
+		return self.connected;
+	}
+	
 	/// get the device error if there is one
 	#[allow(dead_code)]
 	pub fn get_error(&self) -> Option<String> {
@@ -345,14 +399,86 @@ impl Device {
 		Some(format!("ALSA error code {}", self.error))
 	}
 
-	/// read as many bytes of MIDI input as are available,
-	/// up to a reasonable limit.
-	#[allow(dead_code)]
-	pub fn read(&mut self) -> Vec<u8> {
-		let mut buffer = [0u8; 1024];
-		let n = self.read_raw(&mut buffer);
-		buffer[..n].to_vec()
+	/// read a MIDI event.
+	/// things may get screwed up if you aren't careful about
+	/// mixing `.read_bytes()` with this.
+	/// For simplicity, if there's a read error, this just returns None.
+	/// Check `get_error()` to find out more.
+	pub fn read_event(&mut self) -> Option<Event> {
+		let mut byte = self.read_byte()?;
+		if (byte & 0x80) != 0 {
+			let status = byte;
+			// new status
+			self.last_status = status;
+			self.buffered_byte = None;
+
+			if (status & 0b11110000) > 0b11000000 {
+				return Some(Event::Other { status, data: None });
+			}
+
+			byte = self.read_byte()?;
+			if (byte & 0x80) != 0 {
+				// no data provided for MIDI event which should have data.
+				// what can we do...
+				return None;
+			}
+		}
+
+		let channel = self.last_status & 0xf;
 		
+		// at this point we have a data byte
+		assert!((byte & 0x80) == 0);
+		
+
+		match self.last_status & 0xf0 {
+			0x80 | 0x90 | 0xA0 | 0xB0 | 0xE0 => {
+				// event with two bytes of data.
+				if let Some(data1) = self.buffered_byte {
+					// we have both data bytes!
+					self.buffered_byte = None;
+					let data2 = byte;
+					return Some(match self.last_status & 0xf0 {
+						0x80 => Event::NoteOff {
+							channel,
+							note: data1,
+							vel: data2,
+						},
+						0x90 => Event::NoteOn {
+							channel,
+							note: data1,
+							vel: data2,
+						},
+						0xA0 => Event::NoteAftertouch {
+							channel,
+							note: data1,
+							pressure: data2,
+						},
+						0xB0 => Event::ControlChange {
+							channel,
+							controller: data1,
+							value: data2,
+						},
+						0xE0 => {
+							let amount = ((data1 as i16) << 7 | (data2 as i16)) - 0x2000;
+							Event::PitchBend { channel, amount }
+						}
+						_ => panic!("what"),
+					});
+				} else {
+					self.buffered_byte = Some(byte);
+				}
+			},
+			0xC0 => {
+				return Some(Event::ProgramChange { channel, program: byte });
+			},
+			0xD0 => {
+				return Some(Event::ChannelAftertouch { channel, pressure: byte });
+			}
+			_ => {
+				return Some(Event::Other { status: self.last_status, data: Some(byte) });
+			}
+		}
+		None
 	}
 }
 
