@@ -1,0 +1,8 @@
+[package]
+name = "playmidi"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+cpal = "0.14"
+libc = "0.2"
