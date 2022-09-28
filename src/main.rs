@@ -10,8 +10,7 @@ fn main() {
 	let mut device_mgr = midi_input::DeviceManager::new().expect("Couldn't create device manager");
 	device_mgr.set_quiet(true);
 	let devices = device_mgr.list().expect("couldn't list MIDI devices");
-	let mut index = 0;
-	for device in &devices {
+	for (index, device) in (&devices).into_iter().enumerate() {
 		print!("{:3} | ", index + 1);
 		let mut first = true;
 		for line in device.name.lines() {
@@ -22,14 +21,12 @@ fn main() {
 			first = false;
 		}
 		println!("    -----------------");
-		index += 1;
 	}
 	print!("Select a device (default {}): ", devices.default + 1);
-	match std::io::stdout().flush() {
-		Err(_) => {} // whatever
-		_ => {}
+	if std::io::stdout().flush().is_err() {
+		//who cares
 	}
-
+	
 	let device_id;
 	{
 		let mut buf = String::new();
@@ -37,7 +34,7 @@ fn main() {
 			.read_line(&mut buf)
 			.expect("error reading stdin");
 		let s = buf.trim();
-		if s.len() == 0 {
+		if s.is_empty() {
 			device_id = &devices[devices.default].id;
 		} else {
 			match s.parse::<usize>() {
@@ -51,9 +48,8 @@ fn main() {
 			}
 		}
 	}
-	let mut device = device_mgr
-		.open(&device_id)
-		.expect("error opening MIDI device");
+	let mut device = device_mgr.open(device_id)
+			.expect("error opening MIDI device");
 
 	while device.is_connected() {
 		let maybe_event = device.read_event();
@@ -64,9 +60,9 @@ fn main() {
 		}
 		if let Some(err) = device.get_error() {
 			eprintln!("Error: {}", err);
+			device.clear_error();
 		}
 	}
-
 	/*
 	let host = cpal::default_host();
 	let device = host.default_output_device().expect("no output device available");

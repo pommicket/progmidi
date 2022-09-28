@@ -60,7 +60,7 @@ pub struct Device {
 	// used to hold first data byte of two-data-byte MIDI events.
 	buffered_byte: Option<u8>,
 	last_status: u8,
-	connected: bool
+	connected: bool,
 }
 
 /// An error produced by opening a device.
@@ -131,7 +131,7 @@ impl<'a> IntoIterator for &'a DeviceList {
 	type IntoIter = std::slice::Iter<'a, DeviceInfo>;
 
 	fn into_iter(self) -> Self::IntoIter {
-		(&self.devices).into_iter()
+		self.devices.iter()
 	}
 }
 
@@ -170,13 +170,19 @@ extern "C" {
 	fn snd_lib_error_set_handler(handler: *mut c_void) -> c_int;
 }
 
-impl Into<String> for DeviceOpenError {
-	fn into(self) -> String {
+impl From<&DeviceOpenError> for String {
+	fn from(e: &DeviceOpenError) -> String {
 		use DeviceOpenError::*;
-		match self {
+		match e {
 			NotFound(s) => format!("device not found: {}", s),
 			Other(s) => s.clone(),
 		}
+	}
+}
+
+impl From<DeviceOpenError> for String {
+	fn from(e: DeviceOpenError) -> String {
+		String::from(&e)
 	}
 }
 
@@ -254,7 +260,7 @@ impl DeviceManager {
 		loop {
 			let hint;
 			unsafe {
-				hint = *hints.offset(idx as isize);
+				hint = *hints.add(idx);
 			}
 			if hint.is_null() {
 				break;
@@ -278,7 +284,7 @@ impl DeviceManager {
 			// we need the name to be able to do anything with the device
 			if let Some(name_unwrapped) = name {
 				let has_desc = desc.is_some();
-				let desc_unwrapped = desc.unwrap_or("(no description)".to_string());
+				let desc_unwrapped = desc.unwrap_or_else(|| "(no description)".to_string());
 				let desc_str = format!("{}\n{}", name_unwrapped, desc_unwrapped);
 				let info = DeviceInfo {
 					id: DeviceID {
@@ -382,14 +388,14 @@ impl Device {
 			None
 		}
 	}
-	
+
 	/// returns false if the device was disconnected.
 	/// if a device is disconnected and reconnected, you need to reopen it.
 	/// (its ID should remain the same)
 	pub fn is_connected(&self) -> bool {
-		return self.connected;
+		self.connected
 	}
-	
+
 	/// get the device error if there is one
 	#[allow(dead_code)]
 	pub fn get_error(&self) -> Option<String> {
@@ -397,6 +403,10 @@ impl Device {
 			return None;
 		}
 		Some(format!("ALSA error code {}", self.error))
+	}
+
+	pub fn clear_error(&mut self) {
+		self.error = 0;
 	}
 
 	/// read a MIDI event.
@@ -425,10 +435,9 @@ impl Device {
 		}
 
 		let channel = self.last_status & 0xf;
-		
+
 		// at this point we have a data byte
 		assert!((byte & 0x80) == 0);
-		
 
 		match self.last_status & 0xf0 {
 			0x80 | 0x90 | 0xA0 | 0xB0 | 0xE0 => {
@@ -467,15 +476,24 @@ impl Device {
 				} else {
 					self.buffered_byte = Some(byte);
 				}
-			},
+			}
 			0xC0 => {
-				return Some(Event::ProgramChange { channel, program: byte });
-			},
+				return Some(Event::ProgramChange {
+					channel,
+					program: byte,
+				});
+			}
 			0xD0 => {
-				return Some(Event::ChannelAftertouch { channel, pressure: byte });
+				return Some(Event::ChannelAftertouch {
+					channel,
+					pressure: byte,
+				});
 			}
 			_ => {
-				return Some(Event::Other { status: self.last_status, data: Some(byte) });
+				return Some(Event::Other {
+					status: self.last_status,
+					data: Some(byte),
+				});
 			}
 		}
 		None
