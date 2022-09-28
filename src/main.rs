@@ -5,11 +5,13 @@ use std::io::Write;
 //use cpal::traits::{HostTrait, DeviceTrait, StreamTrait};
 
 mod midi_input;
+mod soundfont;
 
-fn main() {
-	let mut device_mgr = midi_input::DeviceManager::new().expect("Couldn't create device manager");
+#[allow(unused)]
+fn playmidi_main() -> Result<(), String> {
+	let mut device_mgr = midi_input::DeviceManager::new()?;
 	device_mgr.set_quiet(true);
-	let devices = device_mgr.list().expect("couldn't list MIDI devices");
+	let devices = device_mgr.list()?;
 	for (index, device) in (&devices).into_iter().enumerate() {
 		print!("{:3} | ", index + 1);
 		let mut first = true;
@@ -26,7 +28,7 @@ fn main() {
 	if std::io::stdout().flush().is_err() {
 		//who cares
 	}
-	
+
 	let device_id;
 	{
 		let mut buf = String::new();
@@ -42,14 +44,14 @@ fn main() {
 					device_id = &devices[idx - 1].id;
 				}
 				_ => {
-					eprintln!("Bad device ID: {}", s);
-					return;
+					return Err(format!("Bad device ID: {}", s));
 				}
 			}
 		}
 	}
-	let mut device = device_mgr.open(device_id)
-			.expect("error opening MIDI device");
+	let mut device = device_mgr
+		.open(device_id)
+		.expect("error opening MIDI device");
 
 	while device.is_connected() {
 		let maybe_event = device.read_event();
@@ -63,6 +65,24 @@ fn main() {
 			device.clear_error();
 		}
 	}
+	Ok(())
+}
+
+fn main() {
+	let sf = match soundfont::SoundFont::open("/etc/alternatives/default-GM.sf2") {
+		Err(x) => {
+			eprintln!("Error: {}", String::from(x));
+			return;
+		},
+		Ok(s) => s,
+	};
+	
+	println!("{}",sf.name);
+	
+	// 	let result = playmidi_main();
+	// 	if let Err(s) = result {
+	// 		eprintln!("Error: {}", s);
+	// 	}
 	/*
 	let host = cpal::default_host();
 	let device = host.default_output_device().expect("no output device available");

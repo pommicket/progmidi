@@ -5,11 +5,7 @@ use std::ffi::{c_char, c_int, c_void, CStr, CString};
 /// Basic usage:
 /// ```
 /// let mut manager = DeviceManager::new().unwrap();
-/// let mut devices = manager.list();
-/// while devices.len() == 0 {
-///     std::thread::sleep(std::time::Duration::from_millis(100));
-///     devices = manager.list();
-/// }
+/// let mut devices = manager.list().unwrap();
 /// let mut i = devices.default;
 /// for device in devices {
 ///      println!("{}",device.name);
@@ -67,16 +63,26 @@ pub struct Device {
 #[derive(Debug)]
 pub enum DeviceOpenError {
 	/// the device was not found.
-	/// this can hapen if it was disconnected between calling `list_devices`
-	/// and `open_device`.
+	/// this can hapen if it was disconnected between calling `list`
+	/// and `open`.
 	NotFound(String),
 	/// other error
 	Other(String),
 }
 
+/// A list of available MIDI input devices.
 pub struct DeviceList {
 	pub devices: Vec<DeviceInfo>,
 	pub default: usize,
+}
+
+/// Error produced by `DeviceManager::list`
+#[derive(Debug, PartialEq, Eq)]
+pub enum DeviceListError {
+	/// There are no MIDI input devices available
+	NoDevices,
+	/// Other error
+	Other(String),
 }
 
 /// A MIDI event.
@@ -186,6 +192,22 @@ impl From<DeviceOpenError> for String {
 	}
 }
 
+impl From<&DeviceListError> for String {
+	fn from(e: &DeviceListError) -> String {
+		use DeviceListError::*;
+		match e {
+			NoDevices => "no devices found".to_string(),
+			Other(s) => s.clone(),
+		}
+	}
+}
+
+impl From<DeviceListError> for String {
+	fn from(e: DeviceListError) -> String {
+		String::from(&e)
+	}
+}
+
 // technically there should be varargs here but oh well
 pub unsafe extern "C" fn snd_lib_error_handler_quiet(
 	_file: *const c_char,
@@ -239,7 +261,7 @@ impl DeviceManager {
 	}
 
 	/// Returns a `DeviceList` containing descriptions for all MIDI input devices.
-	pub fn list(&self) -> Result<DeviceList, String> {
+	pub fn list(&self) -> Result<DeviceList, DeviceListError> {
 		let mut hints: *mut *mut c_void = 0 as _;
 		let err: c_int;
 		unsafe {
@@ -250,7 +272,10 @@ impl DeviceManager {
 		// in theory hints should never be null if err != 0.
 		// but you can never be sure.
 		if err != 0 || hints == 0 as _ {
-			return Err(format!("failed to get device hints (error code {})", err));
+			return Err(DeviceListError::Other(format!(
+				"failed to get device hints (error code {})",
+				err
+			)));
 		}
 
 		let mut idx: usize = 0;
@@ -307,6 +332,9 @@ impl DeviceManager {
 			snd_device_name_free_hint(hints);
 		}
 
+		if devices.is_empty() {
+			return Err(DeviceListError::NoDevices);
+		}
 		Ok(DeviceList {
 			devices,
 			default: default.unwrap_or(0),
