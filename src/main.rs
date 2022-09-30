@@ -69,7 +69,7 @@ fn playmidi_main() -> Result<(), String> {
 }
 
 fn main() {
-	let sf = match soundfont::SoundFont::open("/etc/alternatives/default-GM.sf2") {
+	let _sf = match soundfont::SoundFont::open("/etc/alternatives/default-GM.sf2") {
 		Err(x) => {
 			eprintln!("Error: {}", String::from(x));
 			return;
@@ -77,7 +77,6 @@ fn main() {
 		Ok(s) => s,
 	};
 	
-	println!("{}",sf.name);
 	
 	// 	let result = playmidi_main();
 	// 	if let Err(s) = result {
