@@ -3,7 +3,7 @@ extern crate cpal;
 
 use std::io::Write;
 
-use cpal::traits::{HostTrait, DeviceTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 mod midi_input;
 mod soundfont;
@@ -70,7 +70,7 @@ fn playmidi_main() -> Result<(), String> {
 }
 
 fn main() {
-	let mut sf = match soundfont::SoundFont::open("/etc/alternatives/default-GM.sf2") {
+	let mut sf = match soundfont::SoundFont::open("/usr/share/sounds/sf2/FluidR3_GM.sf2") {
 		Err(x) => {
 			eprintln!("Error: {}", String::from(x));
 			return;
@@ -78,17 +78,23 @@ fn main() {
 		Ok(s) => s,
 	};
 
-	 	for i in 0..sf.preset_count() {
-	 		println!("{}. {}", i, sf.preset_name(i).unwrap());
-	 	}
+	for i in 0..sf.preset_count() {
+		println!("{}. {}", i, sf.preset_name(i).unwrap());
+	}
+
+	//sf._debug_preset_zones(125);
+	//sf._debug_instrument_zones(148);
 
 	// 	let result = playmidi_main();
 	// 	if let Err(s) = result {
 	// 		eprintln!("Error: {}", s);
 	// 	}
 	let host = cpal::default_host();
-	let device = host.default_output_device().expect("no output device available");
-	let supported_configs = device.supported_output_configs()
+	let device = host
+		.default_output_device()
+		.expect("no output device available");
+	let supported_configs = device
+		.supported_output_configs()
 		.expect("error while querying configs");
 	let mut chosen_config = None;
 	for config in supported_configs {
@@ -101,39 +107,41 @@ fn main() {
 		None => {
 			eprintln!("Couldn't configure audio device to have 2 16-bit channels.");
 			return;
-		},
+		}
 		Some(x) => x,
 	};
-	let supp_config: cpal::SupportedStreamConfig = chosen_config
-		.with_max_sample_rate()
-		.into();
-	if supp_config.channels() != 2 {
-	}
+	let supp_config: cpal::SupportedStreamConfig = chosen_config.with_max_sample_rate().into();
+	if supp_config.channels() != 2 {}
 	let config = supp_config.into();
 	let mut time = 0.0;
 	let mut key = 60;
-	let stream = device.build_output_stream(
-		&config,
-		move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
-			for x in data.iter_mut() {
-				*x = 0;
-			}
-			let sample_rate = config.sample_rate.0 as f64;
-			match sf.add_samples_interlaced(126, 1.0, key, 60, time, data, sample_rate) {
-				Ok(false) => {println!("stop")},
-				Err(e) => eprintln!("{}", e),
-				_ => {},
-			}
-			time += (data.len() as f64) / (2.0 * sample_rate);
-			if time >= 1.0 {
-				time = 0.0;
-				key += 1;
-			}
-		},
-		move |err| {
-			println!("audio stream error: {}", err);
-		},
-	).expect("couldn't build output stream");
+	sf.load_samples_for_preset(125).expect("oh no");
+
+	let stream = device
+		.build_output_stream(
+			&config,
+			move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
+				for x in data.iter_mut() {
+					*x = 0;
+				}
+				let sample_rate = config.sample_rate.0 as f64;
+				match sf.add_samples_interlaced(125, 1.0, key, 60, time, data, sample_rate) {
+					Ok(false) => {} //{println!("stop")},
+					Err(e) => eprintln!("{}", e),
+					_ => {}
+				}
+				time += (data.len() as f64) / (2.0 * sample_rate);
+				if time >= 1.0 {
+					println!("{}", sf.cache_size());
+					time = 0.0;
+					key += 1;
+				}
+			},
+			move |err| {
+				println!("audio stream error: {}", err);
+			},
+		)
+		.expect("couldn't build output stream");
 	stream.play().expect("couldn't play stream");
 
 	loop {
