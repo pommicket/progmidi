@@ -12,7 +12,6 @@ IMPORTANT SOUNDFONT TERMINOLOGY:
 	 an object zone refers to a sample
  a SAMPLE is a block of audio data with some properties of how it should be played
 */
-
 use std::fs::File;
 use std::io::{Read, Seek, Write};
 
@@ -1008,7 +1007,7 @@ impl SoundFont {
 			//   here's the key:   audio samples measure voltage, not power
 			//                          P = V^2 / R
 			//                     so a 10x larger sample will have 100x the power (and will be 20dB, not 10dB louder).
-			*/
+				*/
 
 			let mut t = hold_time;
 			let data = &sample.data[..];

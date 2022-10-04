@@ -1,4 +1,4 @@
-// @TODO: sort presets alphabetically
+#![allow(unused_imports)] // @TODO: delete me
 extern crate cpal;
 
 use std::io::Write;
@@ -9,7 +9,7 @@ mod midi_input;
 mod soundfont;
 
 #[allow(unused)]
-fn playmidi_main() -> Result<(), String> {
+fn midi_in_main() -> Result<(), String> {
 	let mut device_mgr = midi_input::DeviceManager::new()?;
 	device_mgr.set_quiet(true);
 	let devices = device_mgr.list()?;
@@ -55,12 +55,10 @@ fn playmidi_main() -> Result<(), String> {
 		.expect("error opening MIDI device");
 
 	while device.is_connected() {
-		let maybe_event = device.read_event();
-		if let Some(event) = maybe_event {
-			println!("{:?}", event);
-		} else {
-			std::thread::sleep(std::time::Duration::from_millis(10));
+		while let Some(event) = device.read_event() {
+			println!("{:?}",event);
 		}
+		std::thread::sleep(std::time::Duration::from_millis(140));
 		if let Some(err) = device.get_error() {
 			eprintln!("Error: {}", err);
 			device.clear_error();
@@ -69,7 +67,8 @@ fn playmidi_main() -> Result<(), String> {
 	Ok(())
 }
 
-fn main() {
+#[allow(unused)]
+fn soundfont_main() {
 	let mut sf = match soundfont::SoundFont::open("/usr/share/sounds/sf2/FluidR3_GM.sf2") {
 		Err(x) => {
 			eprintln!("Error: {}", String::from(x));
@@ -147,4 +146,13 @@ fn main() {
 	loop {
 		std::thread::sleep(std::time::Duration::from_millis(100));
 	}
+}
+
+fn main() {
+	match midi_in_main() {
+		Err(e) => println!("{}", e),
+		_ => {}
+	}
+	/*
+		*/
 }
