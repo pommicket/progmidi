@@ -1,3 +1,5 @@
+/// SOUNDFONT PARSER.
+/// supports .sf2 and .sf3 files.
 /*
 IMPORTANT SOUNDFONT TERMINOLOGY:
  a PRESET is a source you can play from, e.g. "Piano", "Harpsichord", "Choir"
@@ -18,8 +20,11 @@ use std::fs::File;
 use std::io::{Read, Seek, Write};
 
 #[derive(Clone, Copy, Debug)]
+/// type of soundfont
 pub enum FileType {
+	/// .sf2 files, as detailed in the SoundFont 2 spec: <http://www.synthfont.com/sfspec24.pdf>
 	SF2,
+	/// .sf3 files (musescore's vorbis-encoded soundfont format)
 	SF3,
 }
 
@@ -41,7 +46,7 @@ struct Zone {
 	pan: i16,                 // -1000 = full pan left, 1000 = full pan right
 	force_key: i8,            // -1 for no forced key, otherwise input MIDI key is replaced with this
 	force_vel: i8,            // -1 for no forced velocity
-	initial_attenuation: u16, // in centibels
+	initial_attenuation: i16, // in centibels. the spec seems to think this is unsigned, but musescore disagrees.
 	tune: i32,                // in cents
 	reference: ZoneReference,
 	loops: bool,
@@ -91,6 +96,26 @@ struct Sample {
 	data: Vec<i16>,
 }
 
+
+/// basic usage:
+/// ```
+/// let sf = SoundFont::open("soundfont.sf2");
+/// for i in 0..sf.preset_count() {
+///     println!("{}: {}", i, sf.preset_name(i).unwrap())
+/// }
+/// sf.load_samples_for_preset(106).expect("oh no");
+/// let mut request = sf.request(106, 60, 127);
+/// loop {
+///     let samples = [0i16; 4096];
+///     match sf.add_samples_interlaced(&mut request, &mut samples, 44100.0) {
+///         Ok(true) => {},
+///         Ok(false) => break,
+///         Err(e) => eprintln!("{}", e),
+///     }
+///     (play samples)
+/// }
+/// ...
+/// ```
 pub struct SoundFont {
 	file: Option<File>,
 	file_type: FileType,
@@ -119,7 +144,6 @@ pub struct SamplesRequest {
 	hold_time: f64,
 	key: u8,
 	vel: u8,
-	falloff_start: f64,
 	falloff: f32,
 	tune: i32,
 	volume: f32,
@@ -131,19 +155,32 @@ mod vorbis {
 	extern crate libc;
 
 	// stb_vorbis.h seems about 3x faster than libvorbis
+	//  (maybe i was using libvorbis wrong?)
 	// and much easier to use.
 	#[link(name = "stb_vorbis")]
 	extern "C" {
-		fn stb_vorbis_decode_memory(mem: *const c_uchar, len: c_int, channels: *mut c_int, sample_rate: *mut c_int, output: *mut *mut i16) -> c_int;
+		fn stb_vorbis_decode_memory(
+			mem: *const c_uchar,
+			len: c_int,
+			channels: *mut c_int,
+			sample_rate: *mut c_int,
+			output: *mut *mut i16,
+		) -> c_int;
 	}
-	
+
 	/// decode vorbis data into PCM
 	pub fn decode(data: &[u8]) -> Result<Vec<i16>, String> {
 		let mut channels: c_int = 0;
 		let mut sample_rate: c_int = 0;
 		let mut output: *mut i16 = 0 as _;
 		let samples = unsafe {
-			stb_vorbis_decode_memory(&data[0] as _, data.len() as _, (&mut channels) as _, (&mut sample_rate) as _, (&mut output) as _)
+			stb_vorbis_decode_memory(
+				&data[0] as _,
+				data.len() as _,
+				(&mut channels) as _,
+				(&mut sample_rate) as _,
+				(&mut output) as _,
+			)
 		};
 		if samples < 0 {
 			Err("bad vorbis file".to_string())
@@ -156,7 +193,6 @@ mod vorbis {
 			unsafe { libc::free(output as _) };
 			Ok(vec)
 		}
-		
 	}
 }
 
@@ -252,7 +288,7 @@ impl Sample {
 							for i in 0..len as usize {
 								self.data[i] = i16::from_le_bytes([data8[2 * i], data8[2 * i + 1]]);
 							}
-						},
+						}
 						FileType::SF3 => {
 							self.data = vorbis::decode(&data8).map_err(SampleError::Vorbis)?;
 						}
@@ -412,7 +448,6 @@ impl Zone {
 		if let ZoneReference::SampleID(id) = zone2.reference {
 			reference = ZoneReference::SampleID(id);
 		}
-
 		Self {
 			key_range: (0, 0), // not relevant
 			vel_range: (0, 0), // not relevant
@@ -488,7 +523,7 @@ fn read_gen_zone(file: &mut File, zone: &mut Zone, gen_count: u16) -> Result<(),
 			VEL_RANGE => zone.vel_range = amount_range,
 			KEYNUM => zone.force_key = amount_i16.clamp(-1, 127) as i8,
 			VELOCITY => zone.force_vel = amount_i16.clamp(-1, 127) as i8,
-			INITIAL_ATTENUATION => zone.initial_attenuation = amount_u16,
+			INITIAL_ATTENUATION => zone.initial_attenuation = amount_i16,
 			COARSE_TUNE => zone.tune += (amount_i16 as i32) * 100,
 			FINE_TUNE => zone.tune += amount_i16 as i32,
 			SAMPLE_ID => zone.reference = ZoneReference::SampleID(amount_u16),
@@ -595,6 +630,7 @@ fn read_gen_zones<Item: SFObject>(
 /// request for sound font samples.
 impl SamplesRequest {
 	/// set amount of time note has been playing for
+	#[allow(unused)]
 	pub fn set_hold_time(&mut self, t: f64) {
 		self.hold_time = t;
 	}
@@ -609,11 +645,10 @@ impl SamplesRequest {
 		self.volume = volume;
 	}
 
-	/// amplitude will be multiplied by amount ^ (t - start).
-	/// e.g. when a user lets go of a piano key, you might call `set_falloff(release_time, 0.01)`
-	pub fn set_falloff(&mut self, start: f64, amount: f32) {
+	/// every t seconds, volume will be multiplied by amount ^ t
+	/// e.g. when a user lets go of a piano key, you might call `set_falloff(0.01)`
+	pub fn set_falloff(&mut self, amount: f32) {
 		self.falloff = amount;
-		self.falloff_start = start;
 	}
 }
 
@@ -624,7 +659,7 @@ impl SoundFont {
 	/// Instead, a handle to the file is kept open, and whenever samples are needed,
 	/// they are loaded from the file, and cached into memory.
 	/// If you're only dealing with a few presets, you may want to call
-	/// `load_samples_for_preset()` after opening to avoid lag when calling `get_samples()`.
+	/// `load_samples_for_preset()` after opening to avoid lag when getting samples.
 	pub fn open(filename: &str) -> Result<Self, OpenError> {
 		let file_type = if filename.ends_with(".sf3") {
 			FileType::SF3
@@ -633,7 +668,9 @@ impl SoundFont {
 		};
 		Self::open_file(File::open(filename)?, file_type)
 	}
-
+	
+	
+	/// Like `open()` but takes a file instead of a file name.
 	pub fn open_file(mut file: File, file_type: FileType) -> Result<Self, OpenError> {
 		const RIFF: FourCC = fourcc("RIFF");
 		const SFBK: FourCC = fourcc("sfbk");
@@ -715,15 +752,15 @@ impl SoundFont {
 		if list != LIST || sdta != SDTA {
 			return Err(bad_sound_font("no sdta chunk"));
 		}
-		
+
 		let smpl = read_fourcc(&mut file)?;
 		let _smpl_size = read_u32(&mut file)?;
 		let smpl_offset = file.stream_position()?;
-		
+
 		if smpl != SMPL {
 			return Err(bad_sound_font("no smpl chunk"));
 		}
-		
+
 		file.seek(std::io::SeekFrom::Start(sdta_end))?;
 
 		let list = read_fourcc(&mut file)?;
@@ -949,8 +986,8 @@ impl SoundFont {
 			let sample = Sample {
 				start,
 				file_len: end - start,
-				startloop: startloop,
-				endloop: endloop,
+				startloop,
+				endloop,
 				sample_rate,
 				root_key: original_pitch,
 				pitch_correction,
@@ -1001,8 +1038,8 @@ impl SoundFont {
 
 	/// loads all sample data for the given preset into memory.
 	/// you can use `clear_cache()` to unload them.
-	/// this can take a while -- musescore's sf3 file has 100MB of piano samples (when decoded)
-	///    in that case, there's really no good option, since loading them as needed is also slow
+	/// this can take a while -- musescore's sf3 file has 100MB of Grand Piano samples (when decoded).
+	/// in that case, there's really no good option, since loading them as needed is also slow
 	#[allow(unused)]
 	pub fn load_samples_for_preset(&mut self, preset_idx: usize) -> Result<(), SampleError> {
 		if preset_idx >= self.presets.len() {
@@ -1014,7 +1051,11 @@ impl SoundFont {
 			if let ZoneReference::Instrument(inst) = pzone.reference {
 				for izone in self.instruments[inst as usize].zones.iter() {
 					if let ZoneReference::SampleID(sample) = izone.reference {
-						self.samples[sample as usize].get_data(&mut self.file, self.file_type, self.smpl_offset)?;
+						self.samples[sample as usize].get_data(
+							&mut self.file,
+							self.file_type,
+							self.smpl_offset,
+						)?;
 					}
 				}
 			}
@@ -1085,7 +1126,7 @@ impl SoundFont {
 						if let ZoneReference::SampleID(_) = izone.reference {
 							// seems like musescore's sf3 sets sampleType = mono even when that's not the case
 							// (kinda makes sense since you might want to use the same sample for both L+R)
-							// so we'll use the pan instead 
+							// so we'll use the pan instead
 							let pan = pzone.pan + izone.pan;
 							if pan < -100 {
 								if dist < closest_l_dist {
@@ -1097,11 +1138,9 @@ impl SoundFont {
 									closest_r_dist = dist;
 									closest_r = Some(Zone::add(pzone, izone));
 								}
-							} else {
-								if dist < closest_m_dist {
-									closest_m_dist = dist;
-									closest_m = Some(Zone::add(pzone, izone));
-								}
+							} else if dist < closest_m_dist {
+								closest_m_dist = dist;
+								closest_m = Some(Zone::add(pzone, izone));
 							}
 						}
 					}
@@ -1146,16 +1185,12 @@ impl SoundFont {
 	}
 
 	/// create a new sample request.
-	/// this struct is passed to `add_samples_interlaced()`
-	/// you might get slightly better performance if you create one request, and reuse it
-	/// (calling `set_hold_time()` each time), rather than creating a request
-	/// every time you need samples. you're probably fine either way.
+	/// this struct is passed to & updated by `add_samples_interlaced()`
 	pub fn request(
 		&self,
 		preset_idx: usize,
 		key: u8,
 		vel: u8,
-		hold_time: f64,
 	) -> Result<SamplesRequest, SampleError> {
 		if preset_idx >= self.presets.len() {
 			return Err(SampleError::BadPreset);
@@ -1171,20 +1206,19 @@ impl SoundFont {
 			key,
 			vel,
 			tune: 0,
-			hold_time,
+			hold_time: 0.0,
 			falloff: 1.0,
-			falloff_start: 0.0,
 			zones,
 		})
 	}
 
 	/// adds sample data to `samples` which is an i16 slice containing samples LRLRLRLR...
 	///   (`samples` should have even length)
-	/// volume in (0,1) = volume of max velocity note.
-	/// returns Ok(true) if the note should still be held
+	/// volume (0 to 1) = volume of max velocity note.
+	/// returns `Ok(true)` if the note should still be held. increments `request.hold_time` as needed.
 	pub fn add_samples_interlaced(
 		&mut self,
-		request: &SamplesRequest,
+		request: &mut SamplesRequest,
 		samples: &mut [i16],
 		sample_rate: f64,
 	) -> Result<bool, SampleError> {
@@ -1200,7 +1234,7 @@ impl SoundFont {
 			};
 			sample.get_data(&mut self.file, self.file_type, self.smpl_offset)?;
 			let sample_len = sample.data.len();
-			
+
 			let mut tune = zone.tune as i32;
 			let root_key = if zone.force_root_key != -1 {
 				zone.force_root_key as u8
@@ -1264,7 +1298,7 @@ impl SoundFont {
 			let t_inc = 1.0 / sample_rate;
 			let data = &sample.data[data_start as usize..data_end as usize];
 			let tmul = freq_modulation * (sample.sample_rate as f64);
-			let mut falloff = f32::powf(request.falloff, (t - request.falloff_start) as f32);
+			let mut falloff = 1.0; // falloff accrued from these samples
 			let falloff_mul = f32::powf(request.falloff, t_inc as f32);
 			for i in 0..samples.len() / 2 {
 				let mut s = (t * tmul) as u64;
@@ -1278,22 +1312,31 @@ impl SoundFont {
 				let mut sample = data[s as usize] as f32;
 
 				sample *= falloff;
-				// in theory, this might cause problems because of floating-point precision
-				// in practice, it seems fine. and f32::pow is slow.
 				falloff *= falloff_mul;
 				samples[2 * i] += (amplitude * sample * (1.0 - pan)) as i16;
 				samples[2 * i + 1] += (amplitude * sample * pan) as i16;
 				t += t_inc;
 			}
+
+			request.volume *= falloff;
+			if request.volume < 1.0 / 32767.0 {
+				this_held = false;
+			}
+
 			held |= this_held;
 		}
+		request.hold_time += samples.len() as f64 / (2.0 * sample_rate);
 		Ok(held)
 	}
 
+	/// get the number of presets in this soundfont.
+	/// essentially, a preset is an instrument (but instrument
+	/// already means something in soundfont terminology...)
 	pub fn preset_count(&self) -> usize {
 		self.presets.len()
 	}
 
+	/// get the name of the given preset.
 	pub fn preset_name(&self, idx: usize) -> Option<&str> {
 		if idx >= self.presets.len() {
 			None

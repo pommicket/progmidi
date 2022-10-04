@@ -1,14 +1,33 @@
 extern crate cpal;
 
-use std::io::Write;
-
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use std::io::Write;
+use std::sync::Mutex;
 
 mod midi_input;
 mod soundfont;
 
-#[allow(unused)]
-fn midi_in_main() -> Result<(), String> {
+struct Note {
+	key: u8,
+	req: soundfont::SamplesRequest,
+	down: bool,
+	kill: bool, // only used briefly
+}
+
+struct NoteInfo {
+	pitch_bend: i16, // in cents
+	pedal_down: bool,
+	notes: Vec<Note>,
+}
+
+static NOTE_INFO: Mutex<NoteInfo> = Mutex::new(NoteInfo {
+	pitch_bend: 0,
+	notes: vec![],
+	pedal_down: false,
+});
+static SOUNDFONT: Mutex<Option<soundfont::SoundFont>> = Mutex::new(None);
+
+fn playmidi_main() -> Result<(), String> {
 	let mut device_mgr = midi_input::DeviceManager::new()?;
 	device_mgr.set_quiet(true);
 	let devices = device_mgr.list()?;
@@ -49,33 +68,11 @@ fn midi_in_main() -> Result<(), String> {
 			}
 		}
 	}
-	let mut device = device_mgr
+	let mut midi_device = device_mgr
 		.open(device_id)
 		.expect("error opening MIDI device");
 
-	while device.is_connected() {
-		while let Some(event) = device.read_event() {
-			println!("{:?}", event);
-		}
-		std::thread::sleep(std::time::Duration::from_millis(140));
-		if let Some(err) = device.get_error() {
-			eprintln!("Error: {}", err);
-			device.clear_error();
-		}
-	}
-	Ok(())
-}
-
-#[allow(unused)]
-fn soundfont_main() {
-	let mut sf = match soundfont::SoundFont::open("/etc/alternatives/default-GM.sf3") {
-		///usr/share/sounds/sf2/FluidR3_GM.sf2") {
-		Err(x) => {
-			eprintln!("Error: {}", String::from(x));
-			return;
-		}
-		Ok(s) => s,
-	};
+	let mut sf = soundfont::SoundFont::open("/etc/alternatives/default-GM.sf3")?;
 
 	for i in 0..sf.preset_count() {
 		println!("{}. {}", i, sf.preset_name(i).unwrap());
@@ -89,10 +86,10 @@ fn soundfont_main() {
 	// 		eprintln!("Error: {}", s);
 	// 	}
 	let host = cpal::default_host();
-	let device = host
+	let audio_device = host
 		.default_output_device()
 		.expect("no output device available");
-	let supported_configs = device
+	let supported_configs = audio_device
 		.supported_output_configs()
 		.expect("error while querying configs");
 	let mut chosen_config = None;
@@ -104,49 +101,48 @@ fn soundfont_main() {
 	}
 	let chosen_config = match chosen_config {
 		None => {
-			eprintln!("Couldn't configure audio device to have 2 16-bit channels.");
-			return;
+			return Err("Couldn't configure audio device to have 2 16-bit channels.".to_string())
 		}
 		Some(x) => x,
 	};
 	let supp_config: cpal::SupportedStreamConfig = chosen_config.with_max_sample_rate();
 	if supp_config.channels() != 2 {}
 	let config = supp_config.into();
-	let mut time = 0.0;
-	let mut key = 60;
 	let preset = 299;
-	
+
 	{
 		use std::time::Instant;
 		let now = Instant::now();
 		sf.load_samples_for_preset(preset).expect("oh no");
 		println!("Loaded in {:?}", now.elapsed());
 	}
-	let stream = device
+
+	{
+		let mut sflock = SOUNDFONT.lock().expect("couldn't lock soundfont.");
+		*sflock = Some(sf);
+	}
+
+	let stream = audio_device
 		.build_output_stream(
 			&config,
 			move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
-				for x in data.iter_mut() {
-					*x = 0;
-				}
-				let sample_rate = config.sample_rate.0 as f64;
-				for k in key..key + 1 {
-					let mut request = sf.request(preset, k, 60, 0.0).expect("ah");
-					request.set_hold_time(time);
-					request.set_volume(0.5);
-					request.set_tune(0);
-					request.set_falloff(0.0, 0.01);
-					match sf.add_samples_interlaced(&request, data, sample_rate) {
-						Ok(false) => {} //{println!("stop")},
-						Err(e) => eprintln!("{}", e),
-						_ => {}
+				let mut note_info = NOTE_INFO.lock().expect("couldn't lock notes.");
+				let mut maybe_sf = SOUNDFONT.lock().expect("couldn't lock soundfont.");
+				if let Some(sf) = maybe_sf.as_mut() {
+					let sample_rate = config.sample_rate.0 as f64;
+					for x in data.iter_mut() {
+						*x = 0;
 					}
-				}
-				time += (data.len() as f64) / (2.0 * sample_rate);
-				if time >= 0.3 {
-					println!("{}", sf.cache_size());
-					time = 0.0;
-					key += 1;
+					let pitch_bend = note_info.pitch_bend;
+					for note in note_info.notes.iter_mut() {
+						note.req.set_tune(pitch_bend as i32);
+						match sf.add_samples_interlaced(&mut note.req, data, sample_rate) {
+							Ok(true) => {}
+							Ok(false) => note.kill = true,
+							Err(e) => eprintln!("{}", e),
+						}
+					}
+					note_info.notes.retain(|note| !note.kill);
 				}
 			},
 			move |err| {
@@ -156,15 +152,80 @@ fn soundfont_main() {
 		.expect("couldn't build output stream");
 	stream.play().expect("couldn't play stream");
 
-	loop {
-		std::thread::sleep(std::time::Duration::from_millis(100));
+	let note_falloff = 0.1; // falloff when note is released
+	while midi_device.is_connected() {
+		while let Some(event) = midi_device.read_event() {
+			let mut note_info = NOTE_INFO
+				.lock()
+				.map_err(|_| "couldn't lock notes".to_string())?;
+			use midi_input::Event::*;
+			match event {
+				NoteOn { note, vel, .. } => {
+					let mut maybe_sf = SOUNDFONT.lock().expect("couldn't lock soundfont.");
+					note_info.notes.retain(|n| n.key != note);
+					if let Some(sf) = maybe_sf.as_mut() {
+						match sf.request(preset, note, vel) {
+							Ok(mut req) => {
+								req.set_volume(0.1);
+								note_info.notes.push(Note {
+									key: note,
+									req,
+									down: true,
+									kill: false,
+								});
+							}
+							Err(e) => eprintln!("get samples error: {}", e),
+						}
+					}
+				}
+				NoteOff { note, .. } => {
+					let pedal_down = note_info.pedal_down;
+					if let Some(n) = note_info.notes.iter_mut().find(|n| n.key == note) {
+						n.down = false;
+						if !pedal_down {
+							n.req.set_falloff(note_falloff);
+						}
+					}
+				}
+				PitchBend { amount, .. } => {
+					note_info.pitch_bend = amount / 128;
+				}
+				ControlChange {
+					controller, value, ..
+				} => {
+					if controller == 64 {
+						// oddly, a value of 0 means "down"
+						note_info.pedal_down = value < 127;
+						if note_info.pedal_down {
+							// disable falloff for all notes
+							for note in note_info.notes.iter_mut() {
+								note.req.set_falloff(1.0);
+							}
+						} else {
+							// start falloff for all non-down notes
+							for note in note_info.notes.iter_mut() {
+								if !note.down {
+									note.req.set_falloff(note_falloff);
+								}
+							}
+						}
+					}
+				}
+				_ => {}
+			}
+		}
+		if let Some(err) = midi_device.get_error() {
+			eprintln!("Error: {}", err);
+			midi_device.clear_error();
+		}
+		std::thread::sleep(std::time::Duration::from_millis(5));
 	}
+
+	Ok(())
 }
 
 fn main() {
-	// 	match midi_in_main() {
-	// 		Err(e) => println!("{}", e),
-	// 		_ => {}
-	// 	}
-	soundfont_main();
+	if let Err(e) = playmidi_main() {
+		eprintln!("Error: {:?}", e);
+	}
 }
