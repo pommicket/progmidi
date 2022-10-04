@@ -134,7 +134,7 @@ fn soundfont_main() {
 					let mut request = sf.request(preset, k, 60, 0.0).expect("ah");
 					request.set_hold_time(time);
 					request.set_volume(0.5);
-					request.set_tune(((key % 2) * 50) as _);
+					request.set_tune(0);
 					request.set_falloff(0.0, 0.01);
 					match sf.add_samples_interlaced(&request, data, sample_rate) {
 						Ok(false) => {} //{println!("stop")},

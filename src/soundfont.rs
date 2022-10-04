@@ -1,4 +1,3 @@
-#![allow(unused)] // @TODO: delete me
 /*
 IMPORTANT SOUNDFONT TERMINOLOGY:
  a PRESET is a source you can play from, e.g. "Piano", "Harpsichord", "Choir"
@@ -80,16 +79,8 @@ impl SFObject for Preset {
 	}
 }
 
-#[derive(Debug, Clone, Copy)]
-enum SampleType {
-	Mono,
-	Left,
-	Right,
-}
-
 #[derive(Debug)]
 struct Sample {
-	r#type: SampleType,
 	start: u32,
 	file_len: u32, // NOT equal to data.len() for vorbis-encoded samples
 	startloop: u32,
@@ -136,322 +127,36 @@ pub struct SamplesRequest {
 }
 
 mod vorbis {
-	use std::ffi::{c_float, c_int, c_long, c_uchar, c_void, c_char};
-	// so much stuff depends on libc so it's not such
-	// a big deal to add it as a dependency
-	// (we only really need it for size_t)
+	use std::ffi::{c_int, c_uchar};
 	extern crate libc;
-	use libc::{size_t, SEEK_SET, SEEK_END, SEEK_CUR};
 
-	#[repr(C)]
-	struct OvCallbacks {
-		read_func: extern "C" fn(
-			ptr: *mut c_void,
-			size: size_t,
-			nmemb: size_t,
-			datasource: *mut c_void,
-		) -> size_t,
-		seek_func: extern "C" fn(datasource: *mut c_void, offset: i64, whence: c_int) -> c_int,
-		close_func: extern "C" fn(datasource: *mut c_void) -> c_int,
-		tell_func: extern "C" fn(datasource: *mut c_void) -> c_long,
-	}
-
-	#[repr(C)]
-	struct OggSyncState {
-		data: *mut c_uchar,
-		storage: c_int,
-		fill: c_int,
-		returned: c_int,
-		unsynced: c_int,
-		headerbytes: c_int,
-		bodybytes: c_int,
-	}
-
-	type VorbisComment = c_void;
-
-	#[repr(C)]
-	struct OggStreamState {
-		body_data: *mut c_uchar,
-		body_storage: c_long,  /* storage elements allocated */
-		body_fill: c_long,     /* elements stored; fill mark */
-		body_returned: c_long, /* elements of fill returned */
-		lacing_vals: *mut c_int,
-		granule_vals: *mut i64,
-		lacing_storage: c_long,
-		lacing_fill: c_long,
-		lacing_packet: c_long,
-		lacing_returned: c_long,
-		header: [c_uchar; 282],
-		header_fill: c_int,
-		e_o_s: c_int,
-		b_o_s: c_int,
-		serialno: c_long,
-		pageno: c_long,
-		packetno: i64,
-		granulepos: i64,
-	}
-
-	#[repr(C)]
-	struct VorbisInfo {
-		version: c_int,
-		channels: c_int,
-		rate: c_long,
-		bitrate_upper: c_long,
-		bitrate_nominal: c_long,
-		bitrate_lower: c_long,
-		bitrate_window: c_long,
-		codec_setup: *mut c_void,
-	}
-
-	#[repr(C)]
-	struct VorbisDspState {
-		analysisp: c_int,
-		vi: *mut VorbisInfo,
-		pcm: *mut *mut c_float,
-		pcmret: *mut *mut c_float,
-		pcm_storage: c_int,
-		pcm_current: c_int,
-		pcm_returned: c_int,
-		preextrapolate: c_int,
-		eofflag: c_int,
-		l_w: c_long,
-		w: c_long,
-		n_w: c_long,
-		center_w: c_long,
-		granulepos: i64,
-		sequence: i64,
-		glue_bits: i64,
-		time_bits: i64,
-		floor_bits: i64,
-		res_bits: i64,
-		backend_state: *mut c_void,
-	}
-
-	#[repr(C)]
-	struct AllocChain {
-		ptr: *mut c_void,
-		next: *mut AllocChain,
-	}
-
-	#[repr(C)]
-	struct OggPackBuffer {
-		endbyte: c_long,
-		endbit: c_int,
-		buffer: *mut c_uchar,
-		ptr: *mut c_uchar,
-		storage: c_long,
-	}
-
-	#[repr(C)]
-	struct VorbisBlock {
-		pcm: *mut *mut c_float,
-		opb: OggPackBuffer,
-		l_w: c_long,
-		w: c_long,
-		n_w: c_long,
-		pcmend: c_int,
-		mode: c_int,
-		eofflag: c_int,
-		granulepos: i64,
-		sequence: i64,
-		vd: *mut VorbisDspState,
-		localstore: *mut c_void,
-		localtop: c_long,
-		localalloc: c_long,
-		totaluse: c_long,
-		reap: *mut AllocChain,
-		glue_bits: c_long,
-		time_bits: c_long,
-		floor_bits: c_long,
-		res_bits: c_long,
-		internal: *mut c_void,
-	}
-
-	#[repr(C)]
-	struct OggVorbisFile {
-		datasource: *mut c_void,
-		seekable: c_int,
-		offset: i64,
-		end: i64,
-		oy: OggSyncState,
-		links: c_int,
-		offsets: *mut i64,
-		dataoffsets: *mut i64,
-		serialnos: *mut c_long,
-		pcmlengths: *mut i64,
-		vi: *mut VorbisInfo,
-		vc: *mut VorbisComment,
-		pcm_offset: i64,
-		ready_state: c_int,
-		current_serialno: c_long,
-		current_link: c_int,
-		bittrack: i64,
-		samptrack: i64,
-		os: OggStreamState,
-		vd: VorbisDspState,
-		vb: VorbisBlock,
-		callbacks: OvCallbacks,
-	}
-
-	#[link(name = "vorbisfile", kind = "dylib")]
+	// stb_vorbis.h seems about 3x faster than libvorbis
+	// and much easier to use.
+	#[link(name = "stb_vorbis")]
 	extern "C" {
-		fn ov_open_callbacks(
-			datasource: *mut c_void,
-			vf: *mut OggVorbisFile,
-			initial: *mut c_char,
-			ibytes: c_long,
-			callbacks: OvCallbacks,
-		) -> c_int;
-		fn ov_read(
-			vf: *mut OggVorbisFile,
-			buffer: *mut c_char,
-			length: c_int,
-			bigendianp: c_int,
-			word: c_int,
-			sgned: c_int,
-			bitstream: *mut c_int
-		) -> c_int;
-		fn ov_pcm_total(vf: *mut OggVorbisFile, i: c_int) -> i64;
-		fn ov_clear(vf: *mut OggVorbisFile) -> c_int;
-	}
-	
-	const OV_EREAD: c_int = -128;
-	const OV_HOLE: c_int = -3;
-	const OV_EFAULT: c_int = -129;
-	const OV_EIMPL: c_int = -130;
-	const OV_EINVAL: c_int = -131;
-	const OV_ENOTVORBIS: c_int = -132;
-	const OV_EBADHEADER: c_int = -133;
-	const OV_EVERSION: c_int = -134;
-	const OV_ENOTAUDIO: c_int = -135;
-	const OV_EBADPACKET: c_int = -136;
-	const OV_EBADLINK: c_int = -137;
-	const OV_ENOSEEK: c_int = -138;
-	
-	fn vorbis_err_to_string(err: c_int) -> String {
-		match err {
-			OV_EREAD => "read error".to_string(),
-			OV_HOLE => "hole in data".to_string(),
-			OV_EFAULT => "internal logic fault".to_string(),
-			OV_EIMPL => "operation not supported".to_string(),
-			OV_EINVAL => "invalid parameter".to_string(),
-			OV_ENOTVORBIS => "not a vorbis file".to_string(),
-			OV_EBADHEADER => "bad vorbis header".to_string(),
-			OV_EVERSION => "version mismatch".to_string(),
-			OV_ENOTAUDIO => "not audio".to_string(),
-			OV_EBADPACKET => "bad packet".to_string(),
-			OV_EBADLINK => "bad link".to_string(),
-			OV_ENOSEEK => "cannot seek".to_string(),
-			_ => format!("error code {}", err),
-		}
-	}
-	
-	struct MemoryReader {
-		memory: *const u8,
-		pos: usize,
-		len: usize,
-	}
-	
-	impl MemoryReader {
-		extern "C" fn read_func(ptr: *mut c_void, size: size_t, nmemb: size_t, datasource: *mut c_void) -> size_t {
-			let reader = unsafe { (datasource as *mut MemoryReader).as_mut().unwrap() };
-			let mut count = (size as u64) * (nmemb as u64);
-			count = std::cmp::min(count, (reader.len - reader.pos) as u64);
-			let src = unsafe { reader.memory.add(reader.pos) };
-			unsafe { std::ptr::copy(src, ptr as *mut u8, count as usize) };
-			reader.pos += count as usize;
-			count as size_t
-		}
-		
-		extern "C" fn seek_func(datasource: *mut c_void, offset: i64, whence: c_int) -> c_int {
-			let reader = unsafe { (datasource as *mut MemoryReader).as_mut().unwrap() };
-			let off = match whence {
-				SEEK_SET => offset,
-				SEEK_CUR => offset + reader.pos as i64,
-				SEEK_END => offset + (reader.pos as i64) + (reader.len as i64),
-				_ => -1,
-			};
-			if off < 0 || off > reader.len as i64 {
-				-1
-			} else {
-				reader.pos = off as usize;
-				0
-			}
-		}
-		
-		extern "C" fn close_func(_datasource: *mut c_void) -> c_int {
-			0
-		}
-		
-		extern "C" fn tell_func(datasource: *mut c_void) -> c_long {
-			let reader = unsafe { (datasource as *mut MemoryReader).as_mut().unwrap() };
-			reader.pos as c_long
-		}
+		fn stb_vorbis_decode_memory(mem: *const c_uchar, len: c_int, channels: *mut c_int, sample_rate: *mut c_int, output: *mut *mut i16) -> c_int;
 	}
 	
 	/// decode vorbis data into PCM
 	pub fn decode(data: &[u8]) -> Result<Vec<i16>, String> {
-		let mut reader = MemoryReader { memory: data.as_ptr(), pos: 0, len: data.len() };
-		let mut vf = unsafe { std::mem::MaybeUninit::zeroed() };
-		let callbacks = OvCallbacks {
-			read_func: MemoryReader::read_func,
-			seek_func: MemoryReader::seek_func,
-			tell_func: MemoryReader::tell_func,
-			close_func: MemoryReader::close_func,
+		let mut channels: c_int = 0;
+		let mut sample_rate: c_int = 0;
+		let mut output: *mut i16 = 0 as _;
+		let samples = unsafe {
+			stb_vorbis_decode_memory(&data[0] as _, data.len() as _, (&mut channels) as _, (&mut sample_rate) as _, (&mut output) as _)
 		};
-		let result = unsafe {
-			ov_open_callbacks(
-				(&mut reader) as *mut MemoryReader as *mut c_void,
-				(&mut vf).as_mut_ptr(),
-				0 as _,
-				0,
-				callbacks
-			)
-		};
-		if result != 0 {
-			return Err(vorbis_err_to_string(result));
-		}
-		let mut vf = unsafe { vf.assume_init() };
-		
-		let capacity = ((2 * unsafe { ov_pcm_total((&mut vf) as _, -1) }).clamp(0, 0xffffffff) as usize);
-		let mut data8 = Vec::with_capacity(capacity);
-		let mut buffer = [0u8; 4096];
-		loop {
-			let mut bistream: c_int = 0;
-			let n = unsafe {
-				ov_read(
-					(&mut vf) as *mut _,
-					(&mut buffer) as *mut u8 as *mut c_char,
-					buffer.len() as c_int,
-					0,
-					2,
-					1,
-					(&mut bistream) as *mut _,
-				)
-			};
-			if n == 0 {
-				break;
-			} else if n == OV_HOLE {
-			} else if n > 0 && n < (buffer.len() as c_int) {
-				for i in 0..n as usize {
-					data8.push(buffer[i]);
-				}
-			} else {
-				return Err(vorbis_err_to_string(n));
+		if samples < 0 {
+			Err("bad vorbis file".to_string())
+		} else {
+			let samples = samples as usize;
+			let mut vec = Vec::with_capacity(samples);
+			for i in 0..samples {
+				vec.push(unsafe { *output.add(i) });
 			}
+			unsafe { libc::free(output as _) };
+			Ok(vec)
 		}
 		
-		unsafe { ov_clear((&mut vf) as _) };
-		
-		drop(reader); // force reader to live to here. hopefully this works.
-		
-		let mut data16 = Vec::with_capacity(data8.len() / 2);
-		for i in 0..data8.len() / 2 {
-			let bytes = [data8[2*i], data8[2*i+1]];
-			data16.push(i16::from_le_bytes(bytes));
-		}
-		
-		Ok(data16)
 	}
 }
 
@@ -1229,12 +934,7 @@ impl SoundFont {
 			}
 			let pitch_correction = read_i8(&mut file)?;
 			let _sample_link = read_u16(&mut file)?;
-			let sample_type = read_u16(&mut file)?;
-			let r#type = match sample_type {
-				2 => SampleType::Left,
-				4 => SampleType::Right,
-				_ => SampleType::Mono, // meh
-			};
+			let _sample_type = read_u16(&mut file)?;
 
 			match file_type {
 				FileType::SF2 => {
@@ -1247,7 +947,6 @@ impl SoundFont {
 			}
 
 			let sample = Sample {
-				r#type: r#type,
 				start,
 				file_len: end - start,
 				startloop: startloop,
@@ -1302,7 +1001,7 @@ impl SoundFont {
 
 	/// loads all sample data for the given preset into memory.
 	/// you can use `clear_cache()` to unload them.
-	/// this can take a while -- musescore's sf3 file has 200MB of piano samples (when decoded)
+	/// this can take a while -- musescore's sf3 file has 100MB of piano samples (when decoded)
 	///    in that case, there's really no good option, since loading them as needed is also slow
 	#[allow(unused)]
 	pub fn load_samples_for_preset(&mut self, preset_idx: usize) -> Result<(), SampleError> {
@@ -1383,7 +1082,7 @@ impl SoundFont {
 					for izone in inst.zones.iter() {
 						let d2 = izone.distance_to(key, vel);
 						let dist = d1 + d2;
-						if let ZoneReference::SampleID(sample) = izone.reference {
+						if let ZoneReference::SampleID(_) = izone.reference {
 							// seems like musescore's sf3 sets sampleType = mono even when that's not the case
 							// (kinda makes sense since you might want to use the same sample for both L+R)
 							// so we'll use the pan instead 
