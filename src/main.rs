@@ -1,4 +1,3 @@
-#![allow(unused_imports)] // @TODO: delete me
 extern crate cpal;
 
 use std::io::Write;
@@ -56,7 +55,7 @@ fn midi_in_main() -> Result<(), String> {
 
 	while device.is_connected() {
 		while let Some(event) = device.read_event() {
-			println!("{:?}",event);
+			println!("{:?}", event);
 		}
 		std::thread::sleep(std::time::Duration::from_millis(140));
 		if let Some(err) = device.get_error() {
@@ -109,7 +108,7 @@ fn soundfont_main() {
 		}
 		Some(x) => x,
 	};
-	let supp_config: cpal::SupportedStreamConfig = chosen_config.with_max_sample_rate().into();
+	let supp_config: cpal::SupportedStreamConfig = chosen_config.with_max_sample_rate();
 	if supp_config.channels() != 2 {}
 	let config = supp_config.into();
 	let mut time = 0.0;
@@ -124,13 +123,20 @@ fn soundfont_main() {
 					*x = 0;
 				}
 				let sample_rate = config.sample_rate.0 as f64;
-				match sf.add_samples_interlaced(125, 1.0, key, 60, time, data, sample_rate) {
+				for k in key..key+1 {
+				let mut request = sf.request(125, k, 60, 0.0).expect("ah");
+				request.set_hold_time(time);
+				request.set_volume(0.5);
+				request.set_tune(((key % 2) * 50) as _);
+				request.set_falloff(0.0, 0.01);
+				match sf.add_samples_interlaced(&request, data, sample_rate) {
 					Ok(false) => {} //{println!("stop")},
 					Err(e) => eprintln!("{}", e),
 					_ => {}
 				}
+				}
 				time += (data.len() as f64) / (2.0 * sample_rate);
-				if time >= 1.0 {
+				if time >= 0.3 {
 					println!("{}", sf.cache_size());
 					time = 0.0;
 					key += 1;
@@ -149,10 +155,9 @@ fn soundfont_main() {
 }
 
 fn main() {
-	match midi_in_main() {
-		Err(e) => println!("{}", e),
-		_ => {}
-	}
-	/*
-		*/
+	// 	match midi_in_main() {
+	// 		Err(e) => println!("{}", e),
+	// 		_ => {}
+	// 	}
+	soundfont_main();
 }

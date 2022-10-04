@@ -236,15 +236,19 @@ mod windows {
 	pub const MMSYSERR_NOMEM: u32 = 7;
 	pub const MMSYSERR_INVALFLAG: u32 = 10;
 	pub const MMSYSERR_INVALPARAM: u32 = 11;
-	
+
 	pub const MM_MIM_DATA: u32 = 0x3C3;
-	
+
 	pub fn midi_in_dev_get_caps(device_id: u32) -> Option<MidiInCapsW> {
 		let mut mic = MidiInCapsW {
 			..Default::default()
 		};
 		let result = unsafe {
-			midiInGetDevCapsW(device_id, &mut mic as _, std::mem::size_of::<MidiInCapsW>() as u32)
+			midiInGetDevCapsW(
+				device_id,
+				&mut mic as _,
+				std::mem::size_of::<MidiInCapsW>() as u32,
+			)
 		};
 		if result == 0 {
 			Some(mic)
@@ -252,18 +256,17 @@ mod windows {
 			None
 		}
 	}
-	
+
 	// returns u32::MAX on error.
 	pub fn midi_in_get_id(hmi: HMidiIn) -> u32 {
 		let mut device_id = u32::MAX;
 		unsafe { midiInGetID(hmi, (&mut device_id) as *mut u32) };
 		device_id
 	}
-	
+
 	// returns empty string on error.
 	pub fn get_device_name(id: u32) -> String {
 		if let Some(mic) = midi_in_dev_get_caps(id) {
-			
 			let mut name_len = 0;
 			while name_len < mic.pname.len() && mic.pname[name_len] != 0 {
 				name_len += 1;
@@ -273,7 +276,7 @@ mod windows {
 			String::new()
 		}
 	}
-	
+
 	pub type MidiQueue = VecDeque<u8>;
 	pub static MIDI_QUEUES: Mutex<Vec<(HMidiIn, MidiQueue)>> = Mutex::new(vec![]);
 	pub extern "C" fn midi_callback(
@@ -287,7 +290,7 @@ mod windows {
 			// don't care
 			return;
 		}
-		
+
 		if let Ok(mut queues) = MIDI_QUEUES.lock() {
 			for (dev, queue) in queues.iter_mut() {
 				if *dev == midi_in {
@@ -303,12 +306,12 @@ mod windows {
 							// events with 2 data bytes
 							queue.push_back(data1);
 							queue.push_back(data2);
-						},
+						}
 						0b1100 | 0b1101 => {
 							// events with 1 data byte
 							queue.push_back(data1);
-						},
-						_ => {},
+						}
+						_ => {}
 					}
 				}
 			}
@@ -556,15 +559,8 @@ impl DeviceManager {
 		{
 			use windows::*;
 			let mut hmi = 0 as HMidiIn;
-			let result = unsafe {
-				midiInOpen(
-					(&mut hmi) as _,
-					id.id,
-					midi_callback,
-					0,
-					CALLBACK_FUNCTION,
-				)
-			};
+			let result =
+				unsafe { midiInOpen((&mut hmi) as _, id.id, midi_callback, 0, CALLBACK_FUNCTION) };
 
 			if result != 0 {
 				let result_str = match result {
@@ -582,15 +578,17 @@ impl DeviceManager {
 					result_str
 				)));
 			}
-			
+
 			let mut queues = MIDI_QUEUES
 				.lock()
 				.map_err(|_| DeviceOpenError::Other("failed to lock mutex".to_string()))?;
 			queues.push((hmi, VecDeque::new()));
 			drop(queues);
-			
-			unsafe { midiInStart(hmi); }
-			
+
+			unsafe {
+				midiInStart(hmi);
+			}
+
 			Ok(Device::new(hmi))
 		}
 	}
@@ -607,7 +605,7 @@ impl Device {
 			connected: true,
 		}
 	}
-	
+
 	#[cfg(windows)]
 	fn new(hmi: windows::HMidiIn) -> Self {
 		let id = windows::midi_in_get_id(hmi);
@@ -619,7 +617,7 @@ impl Device {
 			last_status: 0,
 		}
 	}
-	
+
 	fn read_raw(&mut self, buffer: &mut [u8]) -> usize {
 		#[cfg(unix)]
 		{
@@ -686,14 +684,14 @@ impl Device {
 	pub fn is_connected(&self) -> bool {
 		#[cfg(unix)]
 		{
-		self.connected
+			self.connected
 		}
 		#[cfg(windows)]
 		{
-		// there's no way of telling when a device is connected, it seems.
-		// this is the best we can do.
-		let name_expected = windows::get_device_name(windows::midi_in_get_id(self.hmi));
-		!name_expected.is_empty() && name_expected == self.name
+			// there's no way of telling when a device is connected, it seems.
+			// this is the best we can do.
+			let name_expected = windows::get_device_name(windows::midi_in_get_id(self.hmi));
+			!name_expected.is_empty() && name_expected == self.name
 		}
 	}
 
@@ -723,25 +721,28 @@ impl Device {
 				// new status
 				self.last_status = status;
 				self.buffered_byte = None;
-	
+
 				if (status >> 4) == 0b1111 {
 					return Some(Event::Other { status, data: None });
 				}
-	
+
 				byte = self.read_byte()?;
 				if (byte & 0x80) != 0 {
 					// no data provided for MIDI event which should have data.
 					// what can we do...
 					// returning None is bad because it stops the stream.
-					return Some(Event::Other { status, data: Some(byte & 0x7f) });
+					return Some(Event::Other {
+						status,
+						data: Some(byte & 0x7f),
+					});
 				}
 			}
-	
+
 			let channel = self.last_status & 0xf;
-	
+
 			// at this point we have a data byte
 			assert!((byte & 0x80) == 0);
-	
+
 			match self.last_status >> 4 {
 				0b1000 | 0b1001 | 0b1010 | 0b1011 | 0b1110 => {
 					// event with two bytes of data.
@@ -755,19 +756,21 @@ impl Device {
 								note: data1,
 								vel: data2,
 							},
-							0b1001 => if data2 == 0 {
-								Event::NoteOff {
-									channel,
-									note: data1,
-									vel: data2,
+							0b1001 => {
+								if data2 == 0 {
+									Event::NoteOff {
+										channel,
+										note: data1,
+										vel: data2,
+									}
+								} else {
+									Event::NoteOn {
+										channel,
+										note: data1,
+										vel: data2,
+									}
 								}
-							} else {
-								Event::NoteOn {
-									channel,
-									note: data1,
-									vel: data2,
-								}
-							},
+							}
 							0b1010 => Event::NoteAftertouch {
 								channel,
 								note: data1,
