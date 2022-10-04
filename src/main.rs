@@ -68,7 +68,8 @@ fn midi_in_main() -> Result<(), String> {
 
 #[allow(unused)]
 fn soundfont_main() {
-	let mut sf = match soundfont::SoundFont::open("/usr/share/sounds/sf2/FluidR3_GM.sf2") {
+	let mut sf = match soundfont::SoundFont::open("/etc/alternatives/default-GM.sf3") {
+		///usr/share/sounds/sf2/FluidR3_GM.sf2") {
 		Err(x) => {
 			eprintln!("Error: {}", String::from(x));
 			return;
@@ -113,8 +114,14 @@ fn soundfont_main() {
 	let config = supp_config.into();
 	let mut time = 0.0;
 	let mut key = 60;
-	sf.load_samples_for_preset(125).expect("oh no");
-
+	let preset = 299;
+	
+	{
+		use std::time::Instant;
+		let now = Instant::now();
+		sf.load_samples_for_preset(preset).expect("oh no");
+		println!("Loaded in {:?}", now.elapsed());
+	}
 	let stream = device
 		.build_output_stream(
 			&config,
@@ -123,17 +130,17 @@ fn soundfont_main() {
 					*x = 0;
 				}
 				let sample_rate = config.sample_rate.0 as f64;
-				for k in key..key+1 {
-				let mut request = sf.request(125, k, 60, 0.0).expect("ah");
-				request.set_hold_time(time);
-				request.set_volume(0.5);
-				request.set_tune(((key % 2) * 50) as _);
-				request.set_falloff(0.0, 0.01);
-				match sf.add_samples_interlaced(&request, data, sample_rate) {
-					Ok(false) => {} //{println!("stop")},
-					Err(e) => eprintln!("{}", e),
-					_ => {}
-				}
+				for k in key..key + 1 {
+					let mut request = sf.request(preset, k, 60, 0.0).expect("ah");
+					request.set_hold_time(time);
+					request.set_volume(0.5);
+					request.set_tune(((key % 2) * 50) as _);
+					request.set_falloff(0.0, 0.01);
+					match sf.add_samples_interlaced(&request, data, sample_rate) {
+						Ok(false) => {} //{println!("stop")},
+						Err(e) => eprintln!("{}", e),
+						_ => {}
+					}
 				}
 				time += (data.len() as f64) / (2.0 * sample_rate);
 				if time >= 0.3 {

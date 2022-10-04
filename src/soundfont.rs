@@ -1,3 +1,4 @@
+#![allow(unused)] // @TODO: delete me
 /*
 IMPORTANT SOUNDFONT TERMINOLOGY:
  a PRESET is a source you can play from, e.g. "Piano", "Harpsichord", "Choir"
@@ -16,6 +17,12 @@ modulators are not currently supported
 */
 use std::fs::File;
 use std::io::{Read, Seek, Write};
+
+#[derive(Clone, Copy, Debug)]
+pub enum FileType {
+	SF2,
+	SF3,
+}
 
 #[derive(Clone, Debug)]
 enum ZoneReference {
@@ -84,7 +91,7 @@ enum SampleType {
 struct Sample {
 	r#type: SampleType,
 	start: u32,
-	len: u32,
+	file_len: u32, // NOT equal to data.len() for vorbis-encoded samples
 	startloop: u32,
 	endloop: u32,
 	sample_rate: u32,
@@ -95,7 +102,8 @@ struct Sample {
 
 pub struct SoundFont {
 	file: Option<File>,
-	sdta_offset: u64,
+	file_type: FileType,
+	smpl_offset: u64,
 	presets: Vec<Preset>,
 	instruments: Vec<Instrument>,
 	samples: Vec<Sample>,
@@ -113,6 +121,7 @@ pub enum SampleError {
 	BadPreset,
 	NoSamples,
 	NoFile,
+	Vorbis(String), // vorbis decode error (sf3 only)
 }
 
 pub struct SamplesRequest {
@@ -123,7 +132,327 @@ pub struct SamplesRequest {
 	falloff: f32,
 	tune: i32,
 	volume: f32,
-	zones: Vec<Zone>
+	zones: Vec<Zone>,
+}
+
+mod vorbis {
+	use std::ffi::{c_float, c_int, c_long, c_uchar, c_void, c_char};
+	// so much stuff depends on libc so it's not such
+	// a big deal to add it as a dependency
+	// (we only really need it for size_t)
+	extern crate libc;
+	use libc::{size_t, SEEK_SET, SEEK_END, SEEK_CUR};
+
+	#[repr(C)]
+	struct OvCallbacks {
+		read_func: extern "C" fn(
+			ptr: *mut c_void,
+			size: size_t,
+			nmemb: size_t,
+			datasource: *mut c_void,
+		) -> size_t,
+		seek_func: extern "C" fn(datasource: *mut c_void, offset: i64, whence: c_int) -> c_int,
+		close_func: extern "C" fn(datasource: *mut c_void) -> c_int,
+		tell_func: extern "C" fn(datasource: *mut c_void) -> c_long,
+	}
+
+	#[repr(C)]
+	struct OggSyncState {
+		data: *mut c_uchar,
+		storage: c_int,
+		fill: c_int,
+		returned: c_int,
+		unsynced: c_int,
+		headerbytes: c_int,
+		bodybytes: c_int,
+	}
+
+	type VorbisComment = c_void;
+
+	#[repr(C)]
+	struct OggStreamState {
+		body_data: *mut c_uchar,
+		body_storage: c_long,  /* storage elements allocated */
+		body_fill: c_long,     /* elements stored; fill mark */
+		body_returned: c_long, /* elements of fill returned */
+		lacing_vals: *mut c_int,
+		granule_vals: *mut i64,
+		lacing_storage: c_long,
+		lacing_fill: c_long,
+		lacing_packet: c_long,
+		lacing_returned: c_long,
+		header: [c_uchar; 282],
+		header_fill: c_int,
+		e_o_s: c_int,
+		b_o_s: c_int,
+		serialno: c_long,
+		pageno: c_long,
+		packetno: i64,
+		granulepos: i64,
+	}
+
+	#[repr(C)]
+	struct VorbisInfo {
+		version: c_int,
+		channels: c_int,
+		rate: c_long,
+		bitrate_upper: c_long,
+		bitrate_nominal: c_long,
+		bitrate_lower: c_long,
+		bitrate_window: c_long,
+		codec_setup: *mut c_void,
+	}
+
+	#[repr(C)]
+	struct VorbisDspState {
+		analysisp: c_int,
+		vi: *mut VorbisInfo,
+		pcm: *mut *mut c_float,
+		pcmret: *mut *mut c_float,
+		pcm_storage: c_int,
+		pcm_current: c_int,
+		pcm_returned: c_int,
+		preextrapolate: c_int,
+		eofflag: c_int,
+		l_w: c_long,
+		w: c_long,
+		n_w: c_long,
+		center_w: c_long,
+		granulepos: i64,
+		sequence: i64,
+		glue_bits: i64,
+		time_bits: i64,
+		floor_bits: i64,
+		res_bits: i64,
+		backend_state: *mut c_void,
+	}
+
+	#[repr(C)]
+	struct AllocChain {
+		ptr: *mut c_void,
+		next: *mut AllocChain,
+	}
+
+	#[repr(C)]
+	struct OggPackBuffer {
+		endbyte: c_long,
+		endbit: c_int,
+		buffer: *mut c_uchar,
+		ptr: *mut c_uchar,
+		storage: c_long,
+	}
+
+	#[repr(C)]
+	struct VorbisBlock {
+		pcm: *mut *mut c_float,
+		opb: OggPackBuffer,
+		l_w: c_long,
+		w: c_long,
+		n_w: c_long,
+		pcmend: c_int,
+		mode: c_int,
+		eofflag: c_int,
+		granulepos: i64,
+		sequence: i64,
+		vd: *mut VorbisDspState,
+		localstore: *mut c_void,
+		localtop: c_long,
+		localalloc: c_long,
+		totaluse: c_long,
+		reap: *mut AllocChain,
+		glue_bits: c_long,
+		time_bits: c_long,
+		floor_bits: c_long,
+		res_bits: c_long,
+		internal: *mut c_void,
+	}
+
+	#[repr(C)]
+	struct OggVorbisFile {
+		datasource: *mut c_void,
+		seekable: c_int,
+		offset: i64,
+		end: i64,
+		oy: OggSyncState,
+		links: c_int,
+		offsets: *mut i64,
+		dataoffsets: *mut i64,
+		serialnos: *mut c_long,
+		pcmlengths: *mut i64,
+		vi: *mut VorbisInfo,
+		vc: *mut VorbisComment,
+		pcm_offset: i64,
+		ready_state: c_int,
+		current_serialno: c_long,
+		current_link: c_int,
+		bittrack: i64,
+		samptrack: i64,
+		os: OggStreamState,
+		vd: VorbisDspState,
+		vb: VorbisBlock,
+		callbacks: OvCallbacks,
+	}
+
+	#[link(name = "vorbisfile", kind = "dylib")]
+	extern "C" {
+		fn ov_open_callbacks(
+			datasource: *mut c_void,
+			vf: *mut OggVorbisFile,
+			initial: *mut c_char,
+			ibytes: c_long,
+			callbacks: OvCallbacks,
+		) -> c_int;
+		fn ov_read(
+			vf: *mut OggVorbisFile,
+			buffer: *mut c_char,
+			length: c_int,
+			bigendianp: c_int,
+			word: c_int,
+			sgned: c_int,
+			bitstream: *mut c_int
+		) -> c_int;
+		fn ov_pcm_total(vf: *mut OggVorbisFile, i: c_int) -> i64;
+		fn ov_clear(vf: *mut OggVorbisFile) -> c_int;
+	}
+	
+	const OV_EREAD: c_int = -128;
+	const OV_HOLE: c_int = -3;
+	const OV_EFAULT: c_int = -129;
+	const OV_EIMPL: c_int = -130;
+	const OV_EINVAL: c_int = -131;
+	const OV_ENOTVORBIS: c_int = -132;
+	const OV_EBADHEADER: c_int = -133;
+	const OV_EVERSION: c_int = -134;
+	const OV_ENOTAUDIO: c_int = -135;
+	const OV_EBADPACKET: c_int = -136;
+	const OV_EBADLINK: c_int = -137;
+	const OV_ENOSEEK: c_int = -138;
+	
+	fn vorbis_err_to_string(err: c_int) -> String {
+		match err {
+			OV_EREAD => "read error".to_string(),
+			OV_HOLE => "hole in data".to_string(),
+			OV_EFAULT => "internal logic fault".to_string(),
+			OV_EIMPL => "operation not supported".to_string(),
+			OV_EINVAL => "invalid parameter".to_string(),
+			OV_ENOTVORBIS => "not a vorbis file".to_string(),
+			OV_EBADHEADER => "bad vorbis header".to_string(),
+			OV_EVERSION => "version mismatch".to_string(),
+			OV_ENOTAUDIO => "not audio".to_string(),
+			OV_EBADPACKET => "bad packet".to_string(),
+			OV_EBADLINK => "bad link".to_string(),
+			OV_ENOSEEK => "cannot seek".to_string(),
+			_ => format!("error code {}", err),
+		}
+	}
+	
+	struct MemoryReader {
+		memory: *const u8,
+		pos: usize,
+		len: usize,
+	}
+	
+	impl MemoryReader {
+		extern "C" fn read_func(ptr: *mut c_void, size: size_t, nmemb: size_t, datasource: *mut c_void) -> size_t {
+			let reader = unsafe { (datasource as *mut MemoryReader).as_mut().unwrap() };
+			let mut count = (size as u64) * (nmemb as u64);
+			count = std::cmp::min(count, (reader.len - reader.pos) as u64);
+			let src = unsafe { reader.memory.add(reader.pos) };
+			unsafe { std::ptr::copy(src, ptr as *mut u8, count as usize) };
+			reader.pos += count as usize;
+			count as size_t
+		}
+		
+		extern "C" fn seek_func(datasource: *mut c_void, offset: i64, whence: c_int) -> c_int {
+			let reader = unsafe { (datasource as *mut MemoryReader).as_mut().unwrap() };
+			let off = match whence {
+				SEEK_SET => offset,
+				SEEK_CUR => offset + reader.pos as i64,
+				SEEK_END => offset + (reader.pos as i64) + (reader.len as i64),
+				_ => -1,
+			};
+			if off < 0 || off > reader.len as i64 {
+				-1
+			} else {
+				reader.pos = off as usize;
+				0
+			}
+		}
+		
+		extern "C" fn close_func(_datasource: *mut c_void) -> c_int {
+			0
+		}
+		
+		extern "C" fn tell_func(datasource: *mut c_void) -> c_long {
+			let reader = unsafe { (datasource as *mut MemoryReader).as_mut().unwrap() };
+			reader.pos as c_long
+		}
+	}
+	
+	/// decode vorbis data into PCM
+	pub fn decode(data: &[u8]) -> Result<Vec<i16>, String> {
+		let mut reader = MemoryReader { memory: data.as_ptr(), pos: 0, len: data.len() };
+		let mut vf = unsafe { std::mem::MaybeUninit::zeroed() };
+		let callbacks = OvCallbacks {
+			read_func: MemoryReader::read_func,
+			seek_func: MemoryReader::seek_func,
+			tell_func: MemoryReader::tell_func,
+			close_func: MemoryReader::close_func,
+		};
+		let result = unsafe {
+			ov_open_callbacks(
+				(&mut reader) as *mut MemoryReader as *mut c_void,
+				(&mut vf).as_mut_ptr(),
+				0 as _,
+				0,
+				callbacks
+			)
+		};
+		if result != 0 {
+			return Err(vorbis_err_to_string(result));
+		}
+		let mut vf = unsafe { vf.assume_init() };
+		
+		let capacity = ((2 * unsafe { ov_pcm_total((&mut vf) as _, -1) }).clamp(0, 0xffffffff) as usize);
+		let mut data8 = Vec::with_capacity(capacity);
+		let mut buffer = [0u8; 4096];
+		loop {
+			let mut bistream: c_int = 0;
+			let n = unsafe {
+				ov_read(
+					(&mut vf) as *mut _,
+					(&mut buffer) as *mut u8 as *mut c_char,
+					buffer.len() as c_int,
+					0,
+					2,
+					1,
+					(&mut bistream) as *mut _,
+				)
+			};
+			if n == 0 {
+				break;
+			} else if n == OV_HOLE {
+			} else if n > 0 && n < (buffer.len() as c_int) {
+				for i in 0..n as usize {
+					data8.push(buffer[i]);
+				}
+			} else {
+				return Err(vorbis_err_to_string(n));
+			}
+		}
+		
+		unsafe { ov_clear((&mut vf) as _) };
+		
+		drop(reader); // force reader to live to here. hopefully this works.
+		
+		let mut data16 = Vec::with_capacity(data8.len() / 2);
+		for i in 0..data8.len() / 2 {
+			let bytes = [data8[2*i], data8[2*i+1]];
+			data16.push(i16::from_le_bytes(bytes));
+		}
+		
+		Ok(data16)
+	}
 }
 
 impl From<&OpenError> for String {
@@ -169,6 +498,7 @@ impl From<&SampleError> for String {
 			BadPreset => "bad preset index".to_string(),
 			NoSamples => "no samples".to_string(),
 			NoFile => "file is closed, but samples from it are needed".to_string(),
+			Vorbis(s) => format!("vorbis error: {}", s),
 		}
 	}
 }
@@ -196,22 +526,31 @@ impl Sample {
 	fn get_data(
 		&mut self,
 		maybe_file: &mut Option<File>,
-		sdta_offset: u64,
+		file_type: FileType,
+		smpl_offset: u64,
 	) -> Result<(), SampleError> {
 		if self.data.is_empty() {
 			match maybe_file {
 				None => Err(SampleError::NoFile),
 				Some(file) => {
-					file.seek(std::io::SeekFrom::Start(
-						sdta_offset + 2 * self.start as u64,
-					))?;
-					let len = self.len as usize;
+					let offset = match file_type {
+						FileType::SF2 => smpl_offset + 2 * self.start as u64,
+						FileType::SF3 => smpl_offset + self.start as u64,
+					};
+					file.seek(std::io::SeekFrom::Start(offset))?;
+					let len = self.file_len as usize;
 					let mut data8 = vec![0u8; 2 * len];
 					file.read_exact(&mut data8)?;
-
-					self.data = vec![0i16; len];
-					for i in 0..len as usize {
-						self.data[i] = i16::from_le_bytes([data8[2 * i], data8[2 * i + 1]]);
+					match file_type {
+						FileType::SF2 => {
+							self.data = vec![0i16; len];
+							for i in 0..len as usize {
+								self.data[i] = i16::from_le_bytes([data8[2 * i], data8[2 * i + 1]]);
+							}
+						},
+						FileType::SF3 => {
+							self.data = vorbis::decode(&data8).map_err(SampleError::Vorbis)?;
+						}
 					}
 					Ok(())
 				}
@@ -331,7 +670,7 @@ impl Zone {
 			&& vel >= self.vel_range.0
 			&& vel <= self.vel_range.1
 	}
-	
+
 	fn distance_to(&self, key: u8, vel: u8) -> u32 {
 		let key = key as i32;
 		let vel = vel as i32;
@@ -342,7 +681,7 @@ impl Zone {
 		use std::cmp::min;
 		let key_dist = min((key - key0).abs(), (key - key1).abs()) as u32;
 		let vel_dist = min((vel - vel0).abs(), (vel - vel1).abs()) as u32;
-		
+
 		// key matters more than velocity.
 		key_dist * 100 + vel_dist
 	}
@@ -554,17 +893,17 @@ impl SamplesRequest {
 	pub fn set_hold_time(&mut self, t: f64) {
 		self.hold_time = t;
 	}
-	
+
 	/// `tune` is in cents
 	pub fn set_tune(&mut self, tune: i32) {
 		self.tune = tune;
 	}
-	
+
 	/// 0 = silent, 1 = max volume.
 	pub fn set_volume(&mut self, volume: f32) {
 		self.volume = volume;
 	}
-	
+
 	/// amplitude will be multiplied by amount ^ (t - start).
 	/// e.g. when a user lets go of a piano key, you might call `set_falloff(release_time, 0.01)`
 	pub fn set_falloff(&mut self, start: f64, amount: f32) {
@@ -582,12 +921,22 @@ impl SoundFont {
 	/// If you're only dealing with a few presets, you may want to call
 	/// `load_samples_for_preset()` after opening to avoid lag when calling `get_samples()`.
 	pub fn open(filename: &str) -> Result<Self, OpenError> {
+		let file_type = if filename.ends_with(".sf3") {
+			FileType::SF3
+		} else {
+			FileType::SF2
+		};
+		Self::open_file(File::open(filename)?, file_type)
+	}
+
+	pub fn open_file(mut file: File, file_type: FileType) -> Result<Self, OpenError> {
 		const RIFF: FourCC = fourcc("RIFF");
 		const SFBK: FourCC = fourcc("sfbk");
 		const LIST: FourCC = fourcc("LIST");
 		const INFO: FourCC = fourcc("INFO");
 		const INAM: FourCC = fourcc("INAM");
 		const SDTA: FourCC = fourcc("sdta");
+		const SMPL: FourCC = fourcc("smpl");
 		const PDTA: FourCC = fourcc("pdta");
 		const INST: FourCC = fourcc("inst");
 		const IBAG: FourCC = fourcc("ibag");
@@ -597,8 +946,6 @@ impl SoundFont {
 		const PHDR: FourCC = fourcc("phdr");
 		const PGEN: FourCC = fourcc("pgen");
 		const PBAG: FourCC = fourcc("pbag");
-
-		let mut file = File::open(filename)?;
 
 		let riff = read_fourcc(&mut file)?;
 		if riff != RIFF {
@@ -663,7 +1010,15 @@ impl SoundFont {
 		if list != LIST || sdta != SDTA {
 			return Err(bad_sound_font("no sdta chunk"));
 		}
-
+		
+		let smpl = read_fourcc(&mut file)?;
+		let _smpl_size = read_u32(&mut file)?;
+		let smpl_offset = file.stream_position()?;
+		
+		if smpl != SMPL {
+			return Err(bad_sound_font("no smpl chunk"));
+		}
+		
 		file.seek(std::io::SeekFrom::Start(sdta_end))?;
 
 		let list = read_fourcc(&mut file)?;
@@ -745,15 +1100,17 @@ impl SoundFont {
 			file.seek(std::io::SeekFrom::Start(inst.offset))?;
 			let inst_count = inst.size / 22;
 			if inst_count < 2 || inst.size % 22 != 0 {
-				return Err(OpenError::BadSoundFont(format!("bad INST chunk size ({} should be at least 44, and a multiple of 22)", inst.size)));
+				return Err(OpenError::BadSoundFont(format!(
+					"bad INST chunk size ({} should be at least 44, and a multiple of 22)",
+					inst.size
+				)));
 			}
 			for i in 0..inst_count {
-				println!("{:x}",file.stream_position()?);
 				let name = read_utf8_fixed_len(&mut file, 20)?;
 				if name.is_empty() && i != inst_count - 1 {
 					return Err(bad_sound_font("instrument with no name."));
 				}
-				
+
 				// oddly, musescore's sf3 file has an empty name for the terminal record.
 				if i == inst_count - 1 && !name.is_empty() && name != "EOI" {
 					return Err(bad_sound_font("no terminal instrument."));
@@ -831,17 +1188,34 @@ impl SoundFont {
 		// --- read shdr chunk ---
 		file.seek(std::io::SeekFrom::Start(shdr.offset))?;
 		let samples_count = shdr.size / 46;
+		if shdr.size % 46 != 0 || samples_count < 1 {
+			return Err(OpenError::BadSoundFont(format!(
+				"bad SHDR size ({}) -- should be a multiple of 46",
+				shdr.size
+			)));
+		}
 		let mut samples = Vec::with_capacity(samples_count as usize);
-		for _i in 0..shdr.size / 46 {
+		for i in 0..samples_count {
 			// a sample
 			let sample_name = read_utf8_fixed_len(&mut file, 20)?;
-			if sample_name == "EOS" {
-				break;
+			if i == samples_count - 1 {
+				if sample_name.is_empty() || sample_name == "EOS" {
+					break;
+				} else {
+					return Err(bad_sound_font("no terminal sample."));
+				}
 			}
+
 			let start = read_u32(&mut file)?;
 			let end = read_u32(&mut file)?;
-			let startloop = read_u32(&mut file)?;
-			let endloop = read_u32(&mut file)?;
+			if end < start {
+				return Err(OpenError::BadSoundFont(format!(
+					"sample starts at {}, and ends before then (at {})",
+					start, end
+				)));
+			}
+			let mut startloop = read_u32(&mut file)?;
+			let mut endloop = read_u32(&mut file)?;
 			/*
 			for sample rates:
 			 "If an illegal or impractical value is encountered,
@@ -859,17 +1233,25 @@ impl SoundFont {
 			let r#type = match sample_type {
 				2 => SampleType::Left,
 				4 => SampleType::Right,
-				_ => SampleType::Mono // meh
+				_ => SampleType::Mono, // meh
 			};
-			
-			println!("{} {} {}", sample_name,start, startloop);
-			
+
+			match file_type {
+				FileType::SF2 => {
+					startloop -= start;
+					endloop -= start;
+				}
+				FileType::SF3 => {
+					// seems like sf3 files have startloop, endloop already relative to start.
+				}
+			}
+
 			let sample = Sample {
 				r#type: r#type,
 				start,
-				len: end - start,
-				startloop: startloop - start,
-				endloop: endloop - start,
+				file_len: end - start,
+				startloop: startloop,
+				endloop: endloop,
 				sample_rate,
 				root_key: original_pitch,
 				pitch_correction,
@@ -909,7 +1291,8 @@ impl SoundFont {
 
 		Ok(SoundFont {
 			file: Some(file),
-			sdta_offset,
+			file_type,
+			smpl_offset,
 			name: name_unwrapped,
 			instruments,
 			samples,
@@ -919,6 +1302,8 @@ impl SoundFont {
 
 	/// loads all sample data for the given preset into memory.
 	/// you can use `clear_cache()` to unload them.
+	/// this can take a while -- musescore's sf3 file has 200MB of piano samples (when decoded)
+	///    in that case, there's really no good option, since loading them as needed is also slow
 	#[allow(unused)]
 	pub fn load_samples_for_preset(&mut self, preset_idx: usize) -> Result<(), SampleError> {
 		if preset_idx >= self.presets.len() {
@@ -930,7 +1315,7 @@ impl SoundFont {
 			if let ZoneReference::Instrument(inst) = pzone.reference {
 				for izone in self.instruments[inst as usize].zones.iter() {
 					if let ZoneReference::SampleID(sample) = izone.reference {
-						self.samples[sample as usize].get_data(&mut self.file, self.sdta_offset)?;
+						self.samples[sample as usize].get_data(&mut self.file, self.file_type, self.smpl_offset)?;
 					}
 				}
 			}
@@ -999,29 +1384,30 @@ impl SoundFont {
 						let d2 = izone.distance_to(key, vel);
 						let dist = d1 + d2;
 						if let ZoneReference::SampleID(sample) = izone.reference {
-							match self.samples[sample as usize].r#type {
-								SampleType::Mono =>
-									if dist < closest_m_dist {
-										closest_m_dist = dist;
-										closest_m = Some(Zone::add(pzone, izone));
-									},
-								SampleType::Left =>
-									if dist < closest_l_dist {
-										closest_l_dist = dist;
-										closest_l = Some(Zone::add(pzone, izone));
-									},
-								SampleType::Right =>
-									if dist < closest_r_dist {
-										closest_r_dist = dist;
-										closest_r = Some(Zone::add(pzone, izone));
-									},
+							// seems like musescore's sf3 sets sampleType = mono even when that's not the case
+							// (kinda makes sense since you might want to use the same sample for both L+R)
+							// so we'll use the pan instead 
+							let pan = pzone.pan + izone.pan;
+							if pan < -100 {
+								if dist < closest_l_dist {
+									closest_l_dist = dist;
+									closest_l = Some(Zone::add(pzone, izone));
+								}
+							} else if pan > 100 {
+								if dist < closest_r_dist {
+									closest_r_dist = dist;
+									closest_r = Some(Zone::add(pzone, izone));
+								}
+							} else {
+								if dist < closest_m_dist {
+									closest_m_dist = dist;
+									closest_m = Some(Zone::add(pzone, izone));
+								}
 							}
 						}
 					}
 				}
 			}
-			
-			
 			if let Some(m) = closest_m {
 				zones.push(m);
 			} else if let Some(l) = closest_l {
@@ -1059,22 +1445,28 @@ impl SoundFont {
 			println!("{:?}", izone);
 		}
 	}
-	
+
 	/// create a new sample request.
 	/// this struct is passed to `add_samples_interlaced()`
 	/// you might get slightly better performance if you create one request, and reuse it
 	/// (calling `set_hold_time()` each time), rather than creating a request
 	/// every time you need samples. you're probably fine either way.
-	pub fn request(&self, preset_idx: usize, key: u8, vel: u8, hold_time: f64) -> Result<SamplesRequest, SampleError> {
+	pub fn request(
+		&self,
+		preset_idx: usize,
+		key: u8,
+		vel: u8,
+		hold_time: f64,
+	) -> Result<SamplesRequest, SampleError> {
 		if preset_idx >= self.presets.len() {
 			return Err(SampleError::BadPreset);
 		}
-		
+
 		let zones = self.get_zones(&self.presets[preset_idx], key, vel);
 		if zones.is_empty() {
 			return Err(SampleError::NoSamples);
 		}
-		
+
 		Ok(SamplesRequest {
 			volume: 1.0,
 			key,
@@ -1083,10 +1475,10 @@ impl SoundFont {
 			hold_time,
 			falloff: 1.0,
 			falloff_start: 0.0,
-			zones
+			zones,
 		})
 	}
-	
+
 	/// adds sample data to `samples` which is an i16 slice containing samples LRLRLRLR...
 	///   (`samples` should have even length)
 	/// volume in (0,1) = volume of max velocity note.
@@ -1099,7 +1491,7 @@ impl SoundFont {
 	) -> Result<bool, SampleError> {
 		let key = request.key;
 		let vel = request.vel;
-		
+
 		let mut held = false;
 
 		for zone in request.zones.iter() {
@@ -1107,8 +1499,9 @@ impl SoundFont {
 				ZoneReference::SampleID(id) => &mut self.samples[id as usize],
 				_ => return Err(SampleError::NoSamples),
 			};
-			sample.get_data(&mut self.file, self.sdta_offset)?;
-
+			sample.get_data(&mut self.file, self.file_type, self.smpl_offset)?;
+			let sample_len = sample.data.len();
+			
 			let mut tune = zone.tune as i32;
 			let root_key = if zone.force_root_key != -1 {
 				zone.force_root_key as u8
@@ -1142,23 +1535,23 @@ impl SoundFont {
 			let amplitude = request.volume * (velnum as f32) * (1.0 / 127.0);
 
 			let mut startloop = (zone.startloop_offset as i64 + (sample.startloop as i64)) as u64;
-			if startloop > sample.len as u64 {
+			if startloop > sample_len as u64 {
 				// uh this is bad
 				startloop = 0;
 			}
 			let mut endloop = (zone.endloop_offset as i64 + (sample.endloop as i64)) as u64;
-			if endloop > sample.len as u64 {
+			if endloop > sample_len as u64 {
 				// uh this is bad
-				endloop = sample.len as u64;
+				endloop = sample_len as u64;
 			}
 			if endloop <= startloop {
 				// uh this is bad
 				startloop = 0;
-				endloop = sample.len as u64;
+				endloop = sample_len as u64;
 			}
-			let data_start = zone.start_offset.clamp(0, sample.len as _);
-			let data_end = (sample.len as i32 + zone.end_offset).clamp(0, sample.len as _);
-			
+			let data_start = zone.start_offset.clamp(0, sample_len as _);
+			let data_end = (sample_len as i32 + zone.end_offset).clamp(0, sample_len as _);
+
 			/*
 			//i've taken initial attenuation out because i dont want it (better to just control the volume).
 			//if you want it back in, multiply amplitude by 0.9885530946569389^attenuation = 0.1^(attenuation/200)
@@ -1175,7 +1568,7 @@ impl SoundFont {
 			let mut falloff = f32::powf(request.falloff, (t - request.falloff_start) as f32);
 			let falloff_mul = f32::powf(request.falloff, t_inc as f32);
 			for i in 0..samples.len() / 2 {
- 				let mut s = (t * tmul) as u64;
+				let mut s = (t * tmul) as u64;
 				if zone.loops && s >= startloop {
 					s = (s - startloop) % (endloop - startloop) + startloop;
 				}
@@ -1184,7 +1577,7 @@ impl SoundFont {
 					break;
 				}
 				let mut sample = data[s as usize] as f32;
-				
+
 				sample *= falloff;
 				// in theory, this might cause problems because of floating-point precision
 				// in practice, it seems fine. and f32::pow is slow.
