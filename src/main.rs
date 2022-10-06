@@ -1,7 +1,9 @@
 extern crate cpal;
 extern crate rhai;
+extern crate chrono;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use std::fs::File;
 use std::io::Write;
 use std::sync::Mutex;
 
@@ -9,7 +11,8 @@ mod midi_input;
 mod soundfont;
 
 const NOTE_FALLOFF: f32 = 0.1; // falloff when note is released
-const CHANNEL_COUNT: usize = 16;
+const CHANNEL_COUNT: usize = 17; // 16 MIDI channels + metronome
+const METRONOME_CHANNEL: i64 = 16;
 
 struct Note {
 	key: u8,
@@ -18,25 +21,55 @@ struct Note {
 	kill: bool, // only used briefly
 }
 
+#[derive(Clone)]
+struct Metronome {
+	bpm: f32,
+	key: i64,
+	volume: f32
+}
+
+struct MidiRecording {
+	file: File,
+	last_event_time: std::time::Instant,
+}
+
 struct NoteInfo {
+	midi_out: Option<MidiRecording>,
 	pitch_bend: i32, // in cents
 	pedal_down: bool,
 	presets: [usize; CHANNEL_COUNT],
 	notes: [Vec<Note>; CHANNEL_COUNT],
 	channel_volumes: [f32; CHANNEL_COUNT],
 	master_volume: f32,
+	metronome: Metronome,
 }
 
 static NOTE_INFO: Mutex<NoteInfo> = Mutex::new(NoteInfo {
+	midi_out: None,
 	pitch_bend: 0,
 	// this is ridiculous.
-	notes: [vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![]],
+	notes: [vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![]],
 	pedal_down: false,
 	presets: [0; CHANNEL_COUNT],
 	channel_volumes: [1.0; CHANNEL_COUNT],
 	master_volume: 1.0,
+	metronome: Metronome {
+		bpm: 0.0,
+		key: 0,
+		volume: 0.0
+	},
 });
+
 static SOUNDFONT: Mutex<Option<soundfont::SoundFont>> = Mutex::new(None);
+
+fn write_u16_be(file: &mut File, n: u16) -> std::io::Result<()> {
+	file.write(&mut u16::to_be_bytes(n))?;
+	Ok(())
+}
+
+fn lock_note_info<'a>() -> std::sync::MutexGuard<'a, NoteInfo> {
+	NOTE_INFO.lock().expect("couldn't lock notes")
+}
 
 fn get_midi_device(idx: i32) -> Result<midi_input::Device, String> {
 	let mut device_mgr = midi_input::DeviceManager::new()?;
@@ -288,6 +321,22 @@ fn set_volume(channel: i64, volume: f64) {
 	note_info.channel_volumes[channel] = volume as f32;
 }
 
+fn set_metronome(key: i64, bpm: f64, volume: f64) {
+	let mut note_info = lock_note_info();
+	note_info.metronome = Metronome {
+		key,
+		bpm: bpm as f32,
+		volume: volume as f32,
+	}
+}
+
+// fn start_midi_recording() {
+// 	let name = chrono::Local::now().format("%Y-%m-%d-%H-%M-%S.mid").to_string();
+// 	let file = File::create(name);
+// 	let note_info = lock_notes();
+// 	
+// }
+// 
 fn call_fn_if_exists(engine: &rhai::Engine, ast: &rhai::AST, name: &str, args: impl rhai::FuncArgs) {
 	let mut scope = rhai::Scope::new();
 	match engine.call_fn::<()>(&mut scope, &ast, name, args).map_err(|e| *e) {
@@ -308,6 +357,12 @@ fn playmidi_main() -> Result<(), String> {
 	engine.register_fn("pm_set_pedal", set_pedal_down);
 	engine.register_fn("pm_bend_pitch", set_pitch_bend);
 	engine.register_fn("pm_set_volume", set_volume);
+	engine.register_fn("pm_set_metronome", set_metronome);
+	// allow integer bpm as well
+	engine.register_fn("pm_set_metronome", |key: i64, bpm: i64, volume: f64| {
+		set_metronome(key, bpm as f64, volume);
+	});
+// 	engine.register_fn("pm_start_midi_recording", start_midi_recording);
 	
 	let engine = engine; // de-multablify
 	let mut ast = engine.compile_file("config.rhai".into()).map_err(|e| format!("{}", e))?;
@@ -347,7 +402,23 @@ fn playmidi_main() -> Result<(), String> {
 	let stream = get_audio_stream()?;
 	stream.play().map_err(|e| format!("{}", e))?;
 	
+	let mut last_metronome_tick = std::time::Instant::now();
+	
 	while midi_device.is_connected() {
+		
+		let metronome_time = last_metronome_tick.elapsed().as_secs_f32();
+		
+		let metronome;
+		{
+			let note_info = NOTE_INFO.lock().expect("couldn't lock notes");
+			metronome = note_info.metronome.clone();
+		}
+		if metronome.bpm > 0.0 && metronome_time >= 60.0 / metronome.bpm {
+			play_note(METRONOME_CHANNEL, metronome.key, (metronome.volume * 127.0) as i64);
+			last_metronome_tick = std::time::Instant::now();
+		}
+		
+		
 		while let Some(event) = midi_device.read_event() {
 			use midi_input::Event::*;
 			match event {
@@ -371,7 +442,7 @@ fn playmidi_main() -> Result<(), String> {
 			eprintln!("Error: {}", err);
 			midi_device.clear_error();
 		}
-		std::thread::sleep(std::time::Duration::from_millis(5));
+		std::thread::sleep(std::time::Duration::from_millis(1));
 	}
 
 	Ok(())

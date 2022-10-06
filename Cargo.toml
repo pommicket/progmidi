@@ -7,6 +7,7 @@ edition = "2021"
 cc = "1.0"
 
 [dependencies]
+chrono = "0.4.22"
 cpal = "0.14"
 libc = "0.2"
 rhai = { version = "1.10", features = [ "only_i64" ] }

@@ -150,6 +150,7 @@ pub struct SamplesRequest {
 	key: u8,
 	vel: u8,
 	falloff: f32,
+	falloff_speed: f32,
 	tune: i32,
 	volume: f32,
 	zones: Vec<Zone>,
@@ -647,7 +648,7 @@ impl SamplesRequest {
 	/// every t seconds, volume will be multiplied by amount ^ t
 	/// e.g. when a user lets go of a piano key, you might call `set_falloff(0.01)`
 	pub fn set_falloff(&mut self, amount: f32) {
-		self.falloff = amount;
+		self.falloff_speed = amount;
 	}
 }
 
@@ -1207,6 +1208,7 @@ impl SoundFont {
 			tune: 0,
 			t: 0.0,
 			falloff: 1.0,
+			falloff_speed: 1.0,
 			zones,
 		})
 	}
@@ -1299,8 +1301,8 @@ impl SoundFont {
 			let t_inc = freq_modulation / sample_rate;
 			let data = &sample.data[data_start as usize..data_end as usize];
 			let tmul = sample.sample_rate as f64;
-			let mut falloff = 1.0; // falloff accrued from these samples
-			let falloff_mul = f32::powf(request.falloff, (1.0 / sample_rate) as f32);
+			let mut falloff = request.falloff;
+			let falloff_mul = f32::powf(request.falloff_speed, (1.0 / sample_rate) as f32);
 			for i in 0..samples.len() / 2 {
 				let mut s = (t * tmul) as u64;
 				if zone.loops && s >= startloop {
@@ -1319,8 +1321,8 @@ impl SoundFont {
 				t += t_inc;
 			}
 
-			request.volume *= falloff;
-			if request.volume < 1.0 / 32767.0 {
+			request.falloff = falloff;
+			if falloff * request.volume < 1.0 / 32767.0 {
 				this_held = false;
 			}
 			final_t = f64::max(final_t, t);	
