@@ -1,7 +1,6 @@
 const PM_DEVICE_ID = 0;
 
 fn pm_note_played(channel, note, vel) {
-	print(channel);
 	if channel <= 4 {
 		channel = 0;
 	}
@@ -33,6 +32,12 @@ fn pm_control_changed(channel, controller, value) {
 		}
 		print("setting metronome to " + bpm);
 		pm_set_metronome(60, bpm, 1.0);
+	} else if controller == 50 {
+		if value == 127 {
+			pm_start_wav_recording();
+		} else {
+			pm_stop_wav_recording();
+		}
 	} else if controller == 51 {
 		if value == 127 {
 			pm_start_midi_recording();

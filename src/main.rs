@@ -36,9 +36,14 @@ struct MidiRecording {
 	last_event_time: Instant,
 }
 
+struct WavRecording {
+	data: Vec<i16>
+}
 
 struct NoteInfo {
+	output_sample_rate: u32,
 	midi_recording: Option<MidiRecording>,
+	wav_recording: Option<WavRecording>,
 	pitch_bend: i32, // in cents
 	pedal_down: bool,
 	presets: [usize; CHANNEL_COUNT],
@@ -50,6 +55,8 @@ struct NoteInfo {
 
 static NOTE_INFO: Mutex<NoteInfo> = Mutex::new(NoteInfo {
 	midi_recording: None,
+	wav_recording: None,
+	output_sample_rate: 0,
 	pitch_bend: 0,
 	// this is ridiculous.
 	notes: [
@@ -85,6 +92,13 @@ static NOTE_INFO: Mutex<NoteInfo> = Mutex::new(NoteInfo {
 static SOUNDFONT: Mutex<Option<SoundFont>> = Mutex::new(None);
 
 impl MidiRecording {
+	fn new() -> Self {
+		MidiRecording {
+			last_event_time: Instant::now(),
+			data: Vec::with_capacity(1000),
+		}
+	}
+	
 	fn write(&mut self, byte: u8) {
 		self.data.push(byte);
 	}
@@ -131,6 +145,85 @@ impl MidiRecording {
 		}
 		self.last_event_time = now;
 	}
+	
+	fn save(&self, filename: &str) -> std::io::Result<()> {
+		print!("Saving MIDI recording...");
+		flush_stdout();
+		let mut file = std::fs::OpenOptions::new()
+			.write(true)
+			.create_new(true)
+			.open(filename)?;
+		file.write("MThd".as_bytes())?;
+		write_u32_be(&mut file, 6)?; // header size
+		write_u16_be(&mut file, 1)?; // <format> = 1
+		write_u16_be(&mut file, 1)?; // <ntrks> = 1
+		// tick = 1ms, quarter note = 600 ticks => 100bpm
+		write_u16_be(&mut file, 600)?;
+		file.write("MTrk".as_bytes())?;
+		
+		// MIDI "track end"
+		// (people complain if we don't include this)
+		let track_end = [0, 0xff, 0x2f, 0];
+		
+		write_u32_be(&mut file, (self.data.len() + track_end.len()) as u32)?; // track size
+		file.write(&self.data)?;
+		file.write(&track_end)?;
+		
+		file.sync_all()?;
+		println!("\rMIDI recording saved to {}", filename);
+		Ok(())
+	}
+}
+
+impl WavRecording {
+	fn new() -> Self {
+		WavRecording {
+			data: Vec::with_capacity(441000),
+		}
+	}
+	
+	fn write(&mut self, samples: &[i16]) {
+		if samples.len() + self.data.len() > (u32::MAX / 2 - 100) as usize {
+			// too much data for wav file
+			return;
+		}
+		for x in samples {
+			self.data.push(*x);
+		}
+	}
+	
+	 fn save(&self, filename: &str, sample_rate: u32) -> std::io::Result<()> {
+		print!("Saving WAV recording...");
+		// rust doesn't seem to be able to optimize out
+		// a i16::to_le_bytes loop. annoying.
+		let data8 = unsafe {
+			std::slice::from_raw_parts(
+				self.data.as_ptr() as *const u8,
+				2 * self.data.len()
+			)
+		};
+		flush_stdout();
+		let mut file = std::fs::OpenOptions::new()
+			.write(true)
+			.create_new(true)
+			.open(filename)?;
+		file.write("RIFF".as_bytes())?;
+		write_u32_le(&mut file, 36 + data8.len() as u32)?; // RIFF chunk size
+		file.write("WAVEfmt ".as_bytes())?;
+		write_u32_le(&mut file, 16)?; // fmt  chunk size
+		write_u16_le(&mut file, 1)?; // PCM
+		write_u16_le(&mut file, 2)?; // 2 channels
+		write_u32_le(&mut file, sample_rate)?;
+		write_u32_le(&mut file, sample_rate * 4)?; // "byte rate"
+		write_u16_le(&mut file, 4)?; // block align
+		write_u16_le(&mut file, 16)?; // bits per sample
+		file.write("data".as_bytes())?;
+		write_u32_le(&mut file, data8.len() as u32)?; // data chunk size
+		file.write(data8)?;
+		file.sync_all()?;
+		println!("\rWAV recording saved to {}", filename);
+		Ok(())
+	 }
 }
 
 fn flush_stdout() {
@@ -144,6 +237,13 @@ fn write_u16_be(file: &mut File, n: u16) -> std::io::Result<usize> {
 }
 fn write_u32_be(file: &mut File, n: u32) -> std::io::Result<usize> {
 	file.write(&mut u32::to_be_bytes(n))
+}
+
+fn write_u16_le(file: &mut File, n: u16) -> std::io::Result<usize> {
+	file.write(&mut u16::to_le_bytes(n))
+}
+fn write_u32_le(file: &mut File, n: u32) -> std::io::Result<usize> {
+	file.write(&mut u32::to_le_bytes(n))
 }
 
 fn lock_note_info<'a>() -> MutexGuard<'a, NoteInfo> {
@@ -206,7 +306,7 @@ fn get_midi_device(idx: i32) -> Result<midi_input::Device, String> {
 	Ok(device_mgr.open(device_id)?)
 }
 
-fn get_audio_stream() -> Result<cpal::Stream, String> {
+fn get_audio_stream() -> Result<(cpal::Stream, u32), String> {
 	let host = cpal::default_host();
 	let audio_device = host
 		.default_output_device()
@@ -223,10 +323,12 @@ fn get_audio_stream() -> Result<cpal::Stream, String> {
 	}
 	let chosen_config = match chosen_config {
 		None => {
-			return Err("Couldn't configure audio device to have 2 16-bit channels.".to_string())
+			return Err("Couldn't configure audio device.".to_string())
 		}
 		Some(x) => x,
 	};
+	// @TODO  why do low sample rates sound bad
+	///     switch to f32 samples?
 	let supp_config: cpal::SupportedStreamConfig = chosen_config.with_max_sample_rate();
 	if supp_config.channels() != 2 {}
 	let config = supp_config.into();
@@ -258,13 +360,17 @@ fn get_audio_stream() -> Result<cpal::Stream, String> {
 						notes.retain(|note| !note.kill);
 					}
 				}
+				drop(maybe_sf);
+				if let Some(recording) = note_info.wav_recording.as_mut() {
+					recording.write(data);
+				}
 			},
 			move |err| {
 				eprintln!("audio stream error: {}", err);
 			},
 		)
 		.map_err(|e| format!("{}", e))?;
-	Ok(stream)
+	Ok((stream, config.sample_rate.0))
 }
 
 #[must_use]
@@ -391,7 +497,7 @@ fn load_preset(channel: i64, preset: i64) {
 		}
 		note_info.presets[channel] = preset;
 	}
-	println!("{}",note_info.presets[0]);
+	
 	if let Some(sf) = soundfont.as_mut() {
 		if preset >= sf.preset_count() {
 			eprintln!("preset {} out of range", preset);
@@ -426,52 +532,18 @@ fn set_metronome(key: i64, bpm: f64, volume: f64) {
 	}
 }
 
-fn start_midi_recording_err() -> std::io::Result<()> {
-	let mut note_info = lock_note_info();
-	note_info.midi_recording = Some(MidiRecording {
-		data: vec![],
-		last_event_time: Instant::now(),
-	});
-	Ok(())
-}
-
 fn start_midi_recording() {
-	if let Err(e) = start_midi_recording_err() {
-		eprintln!("Error starting MIDI recording: {}", e);
-	}
+	let recording = MidiRecording::new();
+	let mut note_info = lock_note_info();
+	note_info.midi_recording = Some(recording);
 }
 
 fn stop_midi_recording_err() -> std::io::Result<()> {
 	let mut note_info = lock_note_info();
-	if let Some(mut recording) = note_info.midi_recording.take() {
+	if let Some(recording) = note_info.midi_recording.take() {
 		drop(note_info);
-		print!("Saving MIDI recording...");
-		flush_stdout();
-		// MIDI "track end"
-		// (people complain if we don't include this)
-		recording.write(0);
-		recording.write(0xff);
-		recording.write(0x2f);
-		recording.write(0x00);
-		
 		let name = chrono::Local::now().format("%Y-%m-%d-%H-%M-%S.mid").to_string();
-		let mut file = std::fs::OpenOptions::new()
-			.write(true)
-			.create_new(true)
-			.open(&name)?;
-		file.write("MThd".as_bytes())?;
-		write_u32_be(&mut file, 6)?; // header size
-		write_u16_be(&mut file, 1)?; // <format> = 1
-		write_u16_be(&mut file, 1)?; // <ntrks> = 1
-		// tick = 1ms, quarter note = 600 ticks => 100bpm
-		write_u16_be(&mut file, 600)?;
-		file.write("MTrk".as_bytes())?;
-		
-		write_u32_be(&mut file, recording.data.len() as u32)?; // track size
-		file.write(&recording.data)?;
-		file.sync_all()?;
-		drop(file);
-		println!("\rMIDI recording saved to {}", name);
+		recording.save(&name)?;
 	}
 	Ok(())
 }
@@ -479,6 +551,29 @@ fn stop_midi_recording_err() -> std::io::Result<()> {
 fn stop_midi_recording() {
 	if let Err(e) = stop_midi_recording_err() {
 		eprintln!("Error stopping MIDI recording: {}", e);
+	}
+}
+
+fn start_wav_recording() {
+	let recording = WavRecording::new();
+	let mut note_info = lock_note_info();
+	note_info.wav_recording = Some(recording);
+}
+
+fn stop_wav_recording_err() -> std::io::Result<()> {
+	let mut note_info = lock_note_info();
+	if let Some(recording) = note_info.wav_recording.take() {
+		let sample_rate = note_info.output_sample_rate;
+		drop(note_info);
+		let name = chrono::Local::now().format("%Y-%m-%d-%H-%M-%S.wav").to_string();
+		recording.save(&name, sample_rate)?;
+	}
+	Ok(())
+}
+
+fn stop_wav_recording() {
+	if let Err(e) = stop_wav_recording_err() {
+		eprintln!("Error stopping WAV recording: {}", e);
 	}
 }
 
@@ -511,6 +606,7 @@ extern "C" {
 
 extern "C" fn sig_handler(_signum: c_int) {
 	stop_midi_recording();
+	stop_wav_recording();
 	std::process::exit(0);
 }
 
@@ -533,6 +629,8 @@ fn main() {
 	});
 	engine.register_fn("pm_start_midi_recording", start_midi_recording);
 	engine.register_fn("pm_stop_midi_recording", stop_midi_recording);
+	engine.register_fn("pm_start_wav_recording", start_wav_recording);
+	engine.register_fn("pm_stop_wav_recording", stop_wav_recording);
 
 	let engine = engine; // de-multablify
 	let args: Vec<String> = std::env::args().collect();
@@ -584,13 +682,19 @@ fn main() {
 	ast.clear_statements();
 
 	let ast = ast; // de-mutablify
-	let stream = match get_audio_stream() {
+	let (stream, sample_rate) = match get_audio_stream() {
 		Ok(s) => s,
 		Err(e) => {
 			eprintln!("Error loading audio stream: {}", e);
 			return;
 		}
 	};
+	
+	{
+		let mut note_info = lock_note_info();
+		note_info.output_sample_rate = sample_rate;
+	}
+	
 	if let Err(e) = stream.play() {
 		eprintln!("Error starting audio stream: {}", e);
 		return;
