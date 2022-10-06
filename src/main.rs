@@ -22,12 +22,13 @@ struct NoteInfo {
 	pitch_bend: i32, // in cents
 	pedal_down: bool,
 	presets: [usize; CHANNEL_COUNT],
-	notes: Vec<Note>,
+	notes: [Vec<Note>; CHANNEL_COUNT],
 }
 
 static NOTE_INFO: Mutex<NoteInfo> = Mutex::new(NoteInfo {
 	pitch_bend: 0,
-	notes: vec![],
+	// this is ridiculous.
+	notes: [vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![]],
 	pedal_down: false,
 	presets: [0; CHANNEL_COUNT],
 });
@@ -122,15 +123,18 @@ fn get_audio_stream() -> Result<cpal::Stream, String> {
 						*x = 0;
 					}
 					let pitch_bend = note_info.pitch_bend;
-					for note in note_info.notes.iter_mut() {
-						note.req.set_tune(pitch_bend as i32);
-						match sf.add_samples_interlaced(&mut note.req, data, sample_rate) {
-							Ok(true) => {}
-							Ok(false) => note.kill = true,
-							Err(e) => eprintln!("{}", e),
+					for channel in 0..CHANNEL_COUNT {
+						let notes = &mut note_info.notes[channel];
+						for note in notes.iter_mut() {
+							note.req.set_tune(pitch_bend as i32);
+							match sf.add_samples_interlaced(&mut note.req, data, sample_rate) {
+								Ok(true) => {}
+								Ok(false) => note.kill = true,
+								Err(e) => eprintln!("{}", e),
+							}
 						}
+						notes.retain(|note| !note.kill);
 					}
-					note_info.notes.retain(|note| !note.kill);
 				}
 			},
 			move |err| {
@@ -163,13 +167,13 @@ fn play_note(channel: i64, note: i64, vel: i64) {
 		.lock()
 		.expect("couldn't lock notes");
 	let mut maybe_sf = SOUNDFONT.lock().expect("couldn't lock soundfont.");
-	note_info.notes.retain(|n| n.key != note);
+	note_info.notes[channel].retain(|n| n.key != note);
 	let preset = note_info.presets[channel];
 	if let Some(sf) = maybe_sf.as_mut() {
 		match sf.request(preset, note, vel) {
 			Ok(mut req) => {
 				req.set_volume(0.1);
-				note_info.notes.push(Note {
+				note_info.notes[channel].push(Note {
 					key: note,
 					req,
 					down: true,
@@ -181,12 +185,19 @@ fn play_note(channel: i64, note: i64, vel: i64) {
 	}
 }
 
-fn release_note(note: u8) {
+fn release_note(channel: i64, note: i64) {
+	let channel = channel as usize;
+	if !check_channel(channel) {
+		return;
+	}
+	let note = note as u8;
+	
 	let mut note_info = NOTE_INFO
 		.lock()
 		.expect("couldn't lock notes");
 	let pedal_down = note_info.pedal_down;
-	if let Some(n) = note_info.notes.iter_mut().find(|n| n.key == note) {
+	let notes  = &mut note_info.notes[channel];
+	if let Some(n) = notes.iter_mut().find(|n| n.key == note && n.down) {
 		n.down = false;
 		if !pedal_down {
 			n.req.set_falloff(NOTE_FALLOFF);
@@ -199,22 +210,26 @@ fn set_pedal_down(down: bool) {
 		.lock()
 		.expect("couldn't lock notes");
 	note_info.pedal_down = down;
-	if down {
-		// disable falloff for all notes
-		for note in note_info.notes.iter_mut() {
-			note.req.set_falloff(1.0);
-		}
-	} else {
-		// start falloff for all non-down notes
-		for note in note_info.notes.iter_mut() {
-			if !note.down {
-				note.req.set_falloff(NOTE_FALLOFF);
+	for channel in 0..CHANNEL_COUNT {
+		let notes  = &mut note_info.notes[channel];
+		if down {
+			// disable falloff for all notes
+			for note in notes.iter_mut() {
+				note.req.set_falloff(1.0);
+			}
+		} else {
+			// start falloff for all non-down notes
+			for note in notes.iter_mut() {
+				if !note.down {
+					note.req.set_falloff(NOTE_FALLOFF);
+				}
 			}
 		}
 	}
 }
 
-fn set_pitch_bend(amount: i32) {
+fn set_pitch_bend(amount: f64) {
+	let amount = amount as i32;
 	let mut note_info = NOTE_INFO
 		.lock()
 		.expect("couldn't lock notes");
@@ -256,8 +271,10 @@ fn load_preset(channel: i64, preset: i64) {
 
 fn call_fn_if_exists(engine: &rhai::Engine, ast: &rhai::AST, name: &str, args: impl rhai::FuncArgs) {
 	let mut scope = rhai::Scope::new();
-	match engine.call_fn::<()>(&mut scope, &ast, name, args) {
+	match engine.call_fn::<()>(&mut scope, &ast, name, args).map_err(|e| *e) {
 		Ok(_) => {},
+		Err(rhai::EvalAltResult::ErrorFunctionNotFound(s, _)) if s == name =>
+			{/* function not found */},
 		Err(e) => eprintln!("Warning: rhai error: {}", e),
 	}
 }
@@ -268,6 +285,10 @@ fn playmidi_main() -> Result<(), String> {
 	engine.register_fn("pm_load_soundfont", load_soundfont);
 	engine.register_fn("pm_load_preset", load_preset);
 	engine.register_fn("pm_play_note", play_note);
+	engine.register_fn("pm_release_note", release_note);
+	engine.register_fn("pm_set_pedal", set_pedal_down);
+	engine.register_fn("pm_bend_pitch", set_pitch_bend);
+	
 	let engine = engine; // de-multablify
 	let mut ast = engine.compile_file("config.rhai".into()).map_err(|e| format!("{}", e))?;
 	engine.run_ast(&ast).map_err(|e| format!("{}", e))?;
@@ -312,15 +333,16 @@ fn playmidi_main() -> Result<(), String> {
 			match event {
 				NoteOn { channel, note, vel } =>
 					call_fn_if_exists(&engine, &ast, "pm_note_played", (channel as i64, note as i64, vel as i64)),
-				NoteOff { note, .. } => release_note(note),
-				PitchBend { amount, .. } => set_pitch_bend(amount as i32 / 128),
+				NoteOff { channel, note, vel } =>
+					call_fn_if_exists(&engine, &ast, "pm_note_released", (channel as i64, note as i64, vel as i64)),
+				PitchBend { channel, amount } => {
+					let amount = (amount as f64 - 8192.0) * (1.0 / 8192.0);
+					call_fn_if_exists(&engine, &ast, "pm_pitch_bent", (channel as i64, amount));
+				}
 				ControlChange {
-					controller, value, ..
+					channel, controller, value
 				} => {
-					if controller == 64 {
-						// oddly, a value of 0 means "down"
-						set_pedal_down(value < 127);
-					}
+					call_fn_if_exists(&engine, &ast, "pm_control_changed", (channel as i64, controller as i64, value as i64));
 				}
 				_ => {}
 			}

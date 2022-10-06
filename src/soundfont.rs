@@ -1265,7 +1265,8 @@ impl SoundFont {
 			} else {
 				vel
 			};
-			let amplitude = request.volume * (velnum as f32) * (1.0 / 127.0);
+			let fvel = (velnum as f32) * (1.0 / 127.0);
+			let amplitude = request.volume * fvel * fvel;
 
 			let mut startloop = (zone.startloop_offset as i64 + (sample.startloop as i64)) as u64;
 			if startloop > sample_len as u64 {
