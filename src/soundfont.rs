@@ -96,7 +96,6 @@ struct Sample {
 	data: Vec<i16>,
 }
 
-
 /// basic usage:
 /// ```
 /// let sf = SoundFont::open("soundfont.sf2");
@@ -146,7 +145,7 @@ pub struct SamplesRequest {
 	// if a note is played for 2s at 440Hz, then 1s at 110Hz, this is 990
 	// storing it like this allows a note to change pitch without causing clicks
 	t: f64,
-	
+
 	key: u8,
 	vel: u8,
 	falloff: f32,
@@ -668,8 +667,7 @@ impl SoundFont {
 		};
 		Self::open_file(File::open(filename)?, file_type)
 	}
-	
-	
+
 	/// Like `open()` but takes a file instead of a file name.
 	pub fn open_file(mut file: File, file_type: FileType) -> Result<Self, OpenError> {
 		const RIFF: FourCC = fourcc("RIFF");
@@ -1325,7 +1323,7 @@ impl SoundFont {
 			if falloff * request.volume < 1.0 / 32767.0 {
 				this_held = false;
 			}
-			final_t = f64::max(final_t, t);	
+			final_t = f64::max(final_t, t);
 			held |= this_held;
 		}
 		request.t = final_t;

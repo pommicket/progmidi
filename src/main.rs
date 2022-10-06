@@ -1,14 +1,15 @@
+extern crate chrono;
 extern crate cpal;
 extern crate rhai;
-extern crate chrono;
-
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use std::fs::File;
-use std::io::Write;
-use std::sync::Mutex;
 
 mod midi_input;
 mod soundfont;
+
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+// use std::fs::File;
+use soundfont::SoundFont;
+use std::io::Write;
+use std::sync::Mutex;
 
 const NOTE_FALLOFF: f32 = 0.1; // falloff when note is released
 const CHANNEL_COUNT: usize = 17; // 16 MIDI channels + metronome
@@ -25,16 +26,16 @@ struct Note {
 struct Metronome {
 	bpm: f32,
 	key: i64,
-	volume: f32
+	volume: f32,
 }
 
-struct MidiRecording {
-	file: File,
-	last_event_time: std::time::Instant,
-}
+// struct MidiRecording {
+// 	file: File,
+// 	last_event_time: std::time::Instant,
+// }
 
 struct NoteInfo {
-	midi_out: Option<MidiRecording>,
+	// 	midi_out: Option<MidiRecording>,
 	pitch_bend: i32, // in cents
 	pedal_down: bool,
 	presets: [usize; CHANNEL_COUNT],
@@ -45,10 +46,28 @@ struct NoteInfo {
 }
 
 static NOTE_INFO: Mutex<NoteInfo> = Mutex::new(NoteInfo {
-	midi_out: None,
+	// 	midi_out: None,
 	pitch_bend: 0,
 	// this is ridiculous.
-	notes: [vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![]],
+	notes: [
+		vec![],
+		vec![],
+		vec![],
+		vec![],
+		vec![],
+		vec![],
+		vec![],
+		vec![],
+		vec![],
+		vec![],
+		vec![],
+		vec![],
+		vec![],
+		vec![],
+		vec![],
+		vec![],
+		vec![],
+	],
 	pedal_down: false,
 	presets: [0; CHANNEL_COUNT],
 	channel_volumes: [1.0; CHANNEL_COUNT],
@@ -56,31 +75,39 @@ static NOTE_INFO: Mutex<NoteInfo> = Mutex::new(NoteInfo {
 	metronome: Metronome {
 		bpm: 0.0,
 		key: 0,
-		volume: 0.0
+		volume: 0.0,
 	},
 });
 
-static SOUNDFONT: Mutex<Option<soundfont::SoundFont>> = Mutex::new(None);
+static SOUNDFONT: Mutex<Option<SoundFont>> = Mutex::new(None);
 
-fn write_u16_be(file: &mut File, n: u16) -> std::io::Result<()> {
-	file.write(&mut u16::to_be_bytes(n))?;
-	Ok(())
-}
+// fn write_u16_be(file: &mut File, n: u16) -> std::io::Result<()> {
+// 	file.write(&mut u16::to_be_bytes(n))?;
+// 	Ok(())
+// }
 
 fn lock_note_info<'a>() -> std::sync::MutexGuard<'a, NoteInfo> {
 	NOTE_INFO.lock().expect("couldn't lock notes")
+}
+
+fn lock_note_info_and_soundfont<'a>() -> (
+	std::sync::MutexGuard<'a, NoteInfo>,
+	std::sync::MutexGuard<'a, Option<SoundFont>>,
+) {
+	(
+		lock_note_info(),
+		SOUNDFONT.lock().expect("couldn't lock soundfont"),
+	)
 }
 
 fn get_midi_device(idx: i32) -> Result<midi_input::Device, String> {
 	let mut device_mgr = midi_input::DeviceManager::new()?;
 	device_mgr.set_quiet(true);
 	let devices = device_mgr.list()?;
-	
+
 	let device_idx = match idx {
 		0 => devices.default,
-		i if i >= 1 => {
-			(i - 1) as usize
-		},
+		i if i >= 1 => (i - 1) as usize,
 		_ => {
 			// user selects device
 			for (index, device) in (&devices).into_iter().enumerate() {
@@ -99,7 +126,7 @@ fn get_midi_device(idx: i32) -> Result<midi_input::Device, String> {
 			if std::io::stdout().flush().is_err() {
 				//who cares
 			}
-		
+
 			let mut buf = String::new();
 			std::io::stdin()
 				.read_line(&mut buf)
@@ -109,9 +136,7 @@ fn get_midi_device(idx: i32) -> Result<midi_input::Device, String> {
 				devices.default
 			} else {
 				match s.parse::<usize>() {
-					Ok(idx) if idx >= 1 && idx <= devices.len() => {
-						idx - 1
-					}
+					Ok(idx) if idx >= 1 && idx <= devices.len() => idx - 1,
 					_ => {
 						return Err(format!("Bad device ID: {}", s));
 					}
@@ -152,8 +177,7 @@ fn get_audio_stream() -> Result<cpal::Stream, String> {
 		.build_output_stream(
 			&config,
 			move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
-				let mut note_info = NOTE_INFO.lock().expect("couldn't lock notes.");
-				let mut maybe_sf = SOUNDFONT.lock().expect("couldn't lock soundfont.");
+				let (mut note_info, mut maybe_sf) = lock_note_info_and_soundfont();
 				if let Some(sf) = maybe_sf.as_mut() {
 					let sample_rate = config.sample_rate.0 as f64;
 					for x in data.iter_mut() {
@@ -161,7 +185,8 @@ fn get_audio_stream() -> Result<cpal::Stream, String> {
 					}
 					let pitch_bend = note_info.pitch_bend;
 					for channel in 0..CHANNEL_COUNT {
-						let volume = 0.1 * note_info.master_volume * note_info.channel_volumes[channel];
+						let volume =
+							0.1 * note_info.master_volume * note_info.channel_volumes[channel];
 						let notes = &mut note_info.notes[channel];
 						for note in notes.iter_mut() {
 							note.req.set_tune(pitch_bend as i32);
@@ -179,7 +204,8 @@ fn get_audio_stream() -> Result<cpal::Stream, String> {
 			move |err| {
 				eprintln!("audio stream error: {}", err);
 			},
-		).map_err(|e| format!("{}", e))?;
+		)
+		.map_err(|e| format!("{}", e))?;
 	Ok(stream)
 }
 
@@ -197,15 +223,12 @@ fn play_note(channel: i64, note: i64, vel: i64) {
 	let channel = channel as usize;
 	let note = note as u8;
 	let vel = vel as u8;
-	
+
 	if !check_channel(channel) {
 		return;
 	}
-	
-	let mut note_info = NOTE_INFO
-		.lock()
-		.expect("couldn't lock notes");
-	let mut maybe_sf = SOUNDFONT.lock().expect("couldn't lock soundfont.");
+
+	let (mut note_info, mut maybe_sf) = lock_note_info_and_soundfont();
 	note_info.notes[channel].retain(|n| n.key != note);
 	let preset = note_info.presets[channel];
 	if let Some(sf) = maybe_sf.as_mut() {
@@ -229,12 +252,10 @@ fn release_note(channel: i64, note: i64) {
 		return;
 	}
 	let note = note as u8;
-	
-	let mut note_info = NOTE_INFO
-		.lock()
-		.expect("couldn't lock notes");
+
+	let mut note_info = NOTE_INFO.lock().expect("couldn't lock notes");
 	let pedal_down = note_info.pedal_down;
-	let notes  = &mut note_info.notes[channel];
+	let notes = &mut note_info.notes[channel];
 	if let Some(n) = notes.iter_mut().find(|n| n.key == note && n.down) {
 		n.down = false;
 		if !pedal_down {
@@ -244,12 +265,10 @@ fn release_note(channel: i64, note: i64) {
 }
 
 fn set_pedal_down(down: bool) {
-	let mut note_info = NOTE_INFO
-		.lock()
-		.expect("couldn't lock notes");
+	let mut note_info = NOTE_INFO.lock().expect("couldn't lock notes");
 	note_info.pedal_down = down;
 	for channel in 0..CHANNEL_COUNT {
-		let notes  = &mut note_info.notes[channel];
+		let notes = &mut note_info.notes[channel];
 		if down {
 			// disable falloff for all notes
 			for note in notes.iter_mut() {
@@ -268,14 +287,12 @@ fn set_pedal_down(down: bool) {
 
 fn set_pitch_bend(amount: f64) {
 	let amount = amount as i32;
-	let mut note_info = NOTE_INFO
-		.lock()
-		.expect("couldn't lock notes");
+	let mut note_info = NOTE_INFO.lock().expect("couldn't lock notes");
 	note_info.pitch_bend = amount;
 }
 
 fn load_soundfont(filename: &str) {
-	if let Ok(sf) = soundfont::SoundFont::open(filename) {
+	if let Ok(sf) = SoundFont::open(filename) {
 		for i in 0..sf.preset_count() {
 			println!("{}. {}", i, sf.preset_name(i).unwrap());
 		}
@@ -304,7 +321,6 @@ fn load_preset(channel: i64, preset: i64) {
 			}
 		}
 	}
-	
 }
 
 fn set_volume(channel: i64, volume: f64) {
@@ -334,15 +350,23 @@ fn set_metronome(key: i64, bpm: f64, volume: f64) {
 // 	let name = chrono::Local::now().format("%Y-%m-%d-%H-%M-%S.mid").to_string();
 // 	let file = File::create(name);
 // 	let note_info = lock_notes();
-// 	
+//
 // }
-// 
-fn call_fn_if_exists(engine: &rhai::Engine, ast: &rhai::AST, name: &str, args: impl rhai::FuncArgs) {
+//
+fn call_fn_if_exists(
+	engine: &rhai::Engine,
+	ast: &rhai::AST,
+	name: &str,
+	args: impl rhai::FuncArgs,
+) {
 	let mut scope = rhai::Scope::new();
-	match engine.call_fn::<()>(&mut scope, &ast, name, args).map_err(|e| *e) {
-		Ok(_) => {},
-		Err(rhai::EvalAltResult::ErrorFunctionNotFound(s, _)) if s == name =>
-			{/* function not found */},
+	match engine
+		.call_fn::<()>(&mut scope, ast, name, args)
+		.map_err(|e| *e)
+	{
+		Ok(_) => {}
+		Err(rhai::EvalAltResult::ErrorFunctionNotFound(s, _)) if s == name => { /* function not found */
+		}
 		Err(e) => eprintln!("Warning: rhai error: {}", e),
 	}
 }
@@ -362,13 +386,14 @@ fn playmidi_main() -> Result<(), String> {
 	engine.register_fn("pm_set_metronome", |key: i64, bpm: i64, volume: f64| {
 		set_metronome(key, bpm as f64, volume);
 	});
-// 	engine.register_fn("pm_start_midi_recording", start_midi_recording);
-	
+	// 	engine.register_fn("pm_start_midi_recording", start_midi_recording);
+
 	let engine = engine; // de-multablify
-	let mut ast = engine.compile_file("config.rhai".into()).map_err(|e| format!("{}", e))?;
+	let mut ast = engine
+		.compile_file("config.rhai".into())
+		.map_err(|e| format!("{}", e))?;
 	engine.run_ast(&ast).map_err(|e| format!("{}", e))?;
-	
-	
+
 	let mut midi_device;
 	{
 		let mut idx = -1;
@@ -376,64 +401,81 @@ fn playmidi_main() -> Result<(), String> {
 			if name == "PM_DEVICE_ID" {
 				match value.as_int() {
 					Ok(i) => match i.try_into() {
-							Ok(i) => idx = i,
-							Err(_) => eprintln!("PM_DEVICE_ID {} too large.", i),
-						},
+						Ok(i) => idx = i,
+						Err(_) => eprintln!("PM_DEVICE_ID {} too large.", i),
+					},
 					Err(t) => eprintln!("Warning: PM_DEVICE_ID should be integer, not {}.", t),
 				}
 			}
 		}
 		midi_device = get_midi_device(idx)?;
 	}
-	
+
 	// without this, top-level statements will be executed each time a function is called
 	ast.clear_statements();
-	
+
 	let ast = ast; // de-mutablify
-	
-//	load_soundfont("/etc/alternatives/default-GM.sf3");
-//	{
-//		use std::time::Instant;
-//		let now = Instant::now();
-//		sf.load_samples_for_preset(preset).expect("oh no");
-//		println!("Loaded in {:?}", now.elapsed());
-//	}
+
+	//	load_soundfont("/etc/alternatives/default-GM.sf3");
+	//	{
+	//		use std::time::Instant;
+	//		let now = Instant::now();
+	//		sf.load_samples_for_preset(preset).expect("oh no");
+	//		println!("Loaded in {:?}", now.elapsed());
+	//	}
 
 	let stream = get_audio_stream()?;
 	stream.play().map_err(|e| format!("{}", e))?;
-	
+
 	let mut last_metronome_tick = std::time::Instant::now();
-	
+
 	while midi_device.is_connected() {
-		
 		let metronome_time = last_metronome_tick.elapsed().as_secs_f32();
-		
+
 		let metronome;
 		{
-			let note_info = NOTE_INFO.lock().expect("couldn't lock notes");
+			let note_info = lock_note_info();
 			metronome = note_info.metronome.clone();
 		}
 		if metronome.bpm > 0.0 && metronome_time >= 60.0 / metronome.bpm {
-			play_note(METRONOME_CHANNEL, metronome.key, (metronome.volume * 127.0) as i64);
+			play_note(
+				METRONOME_CHANNEL,
+				metronome.key,
+				(metronome.volume * 127.0) as i64,
+			);
 			last_metronome_tick = std::time::Instant::now();
 		}
-		
-		
+
 		while let Some(event) = midi_device.read_event() {
 			use midi_input::Event::*;
 			match event {
-				NoteOn { channel, note, vel } =>
-					call_fn_if_exists(&engine, &ast, "pm_note_played", (channel as i64, note as i64, vel as i64)),
-				NoteOff { channel, note, vel } =>
-					call_fn_if_exists(&engine, &ast, "pm_note_released", (channel as i64, note as i64, vel as i64)),
+				NoteOn { channel, note, vel } => call_fn_if_exists(
+					&engine,
+					&ast,
+					"pm_note_played",
+					(channel as i64, note as i64, vel as i64),
+				),
+				NoteOff { channel, note, vel } => call_fn_if_exists(
+					&engine,
+					&ast,
+					"pm_note_released",
+					(channel as i64, note as i64, vel as i64),
+				),
 				PitchBend { channel, amount } => {
 					let amount = (amount as f64 - 8192.0) * (1.0 / 8192.0);
 					call_fn_if_exists(&engine, &ast, "pm_pitch_bent", (channel as i64, amount));
 				}
 				ControlChange {
-					channel, controller, value
+					channel,
+					controller,
+					value,
 				} => {
-					call_fn_if_exists(&engine, &ast, "pm_control_changed", (channel as i64, controller as i64, value as i64));
+					call_fn_if_exists(
+						&engine,
+						&ast,
+						"pm_control_changed",
+						(channel as i64, controller as i64, value as i64),
+					);
 				}
 				_ => {}
 			}
