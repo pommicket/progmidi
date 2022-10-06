@@ -141,7 +141,12 @@ pub enum SampleError {
 }
 
 pub struct SamplesRequest {
-	hold_time: f64,
+	// time note has been held down for, multiplied by frequency
+	// so if a note has been played for 2s at 440Hz, this would be 880
+	// if a note is played for 2s at 440Hz, then 1s at 110Hz, this is 990
+	// storing it like this allows a note to change pitch without causing clicks
+	t: f64,
+	
 	key: u8,
 	vel: u8,
 	falloff: f32,
@@ -629,12 +634,6 @@ fn read_gen_zones<Item: SFObject>(
 
 /// request for sound font samples.
 impl SamplesRequest {
-	/// set amount of time note has been playing for
-	#[allow(unused)]
-	pub fn set_hold_time(&mut self, t: f64) {
-		self.hold_time = t;
-	}
-
 	/// `tune` is in cents
 	pub fn set_tune(&mut self, tune: i32) {
 		self.tune = tune;
@@ -1206,7 +1205,7 @@ impl SoundFont {
 			key,
 			vel,
 			tune: 0,
-			hold_time: 0.0,
+			t: 0.0,
 			falloff: 1.0,
 			zones,
 		})
@@ -1226,6 +1225,7 @@ impl SoundFont {
 		let vel = request.vel;
 
 		let mut held = false;
+		let mut final_t = 0.0;
 
 		for zone in request.zones.iter() {
 			let sample = match zone.reference {
@@ -1295,12 +1295,12 @@ impl SoundFont {
 			//                     so a 10x larger sample will have 100x the power (and will be 20dB, not 10dB louder).
 				*/
 
-			let mut t = request.hold_time;
-			let t_inc = 1.0 / sample_rate;
+			let mut t = request.t;
+			let t_inc = freq_modulation / sample_rate;
 			let data = &sample.data[data_start as usize..data_end as usize];
-			let tmul = freq_modulation * (sample.sample_rate as f64);
+			let tmul = sample.sample_rate as f64;
 			let mut falloff = 1.0; // falloff accrued from these samples
-			let falloff_mul = f32::powf(request.falloff, t_inc as f32);
+			let falloff_mul = f32::powf(request.falloff, (1.0 / sample_rate) as f32);
 			for i in 0..samples.len() / 2 {
 				let mut s = (t * tmul) as u64;
 				if zone.loops && s >= startloop {
@@ -1323,10 +1323,10 @@ impl SoundFont {
 			if request.volume < 1.0 / 32767.0 {
 				this_held = false;
 			}
-
+			final_t = f64::max(final_t, t);	
 			held |= this_held;
 		}
-		request.hold_time += samples.len() as f64 / (2.0 * sample_rate);
+		request.t = final_t;
 		Ok(held)
 	}
 

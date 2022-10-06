@@ -16,6 +16,8 @@ fn pm_control_changed(channel, controller, value) {
 	if controller == 64 {
 		// pedal down if value < 127.
 		pm_set_pedal(value < 127);
+	} else if controller == 1 {
+		pm_set_volume(0, value / 127.0);
 	}
 }
 

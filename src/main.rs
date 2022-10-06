@@ -23,6 +23,8 @@ struct NoteInfo {
 	pedal_down: bool,
 	presets: [usize; CHANNEL_COUNT],
 	notes: [Vec<Note>; CHANNEL_COUNT],
+	channel_volumes: [f32; CHANNEL_COUNT],
+	master_volume: f32,
 }
 
 static NOTE_INFO: Mutex<NoteInfo> = Mutex::new(NoteInfo {
@@ -31,6 +33,8 @@ static NOTE_INFO: Mutex<NoteInfo> = Mutex::new(NoteInfo {
 	notes: [vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![]],
 	pedal_down: false,
 	presets: [0; CHANNEL_COUNT],
+	channel_volumes: [1.0; CHANNEL_COUNT],
+	master_volume: 1.0,
 });
 static SOUNDFONT: Mutex<Option<soundfont::SoundFont>> = Mutex::new(None);
 
@@ -124,9 +128,11 @@ fn get_audio_stream() -> Result<cpal::Stream, String> {
 					}
 					let pitch_bend = note_info.pitch_bend;
 					for channel in 0..CHANNEL_COUNT {
+						let volume = 0.1 * note_info.master_volume * note_info.channel_volumes[channel];
 						let notes = &mut note_info.notes[channel];
 						for note in notes.iter_mut() {
 							note.req.set_tune(pitch_bend as i32);
+							note.req.set_volume(volume);
 							match sf.add_samples_interlaced(&mut note.req, data, sample_rate) {
 								Ok(true) => {}
 								Ok(false) => note.kill = true,
@@ -171,8 +177,7 @@ fn play_note(channel: i64, note: i64, vel: i64) {
 	let preset = note_info.presets[channel];
 	if let Some(sf) = maybe_sf.as_mut() {
 		match sf.request(preset, note, vel) {
-			Ok(mut req) => {
-				req.set_volume(0.1);
+			Ok(req) => {
 				note_info.notes[channel].push(Note {
 					key: note,
 					req,
@@ -249,11 +254,11 @@ fn load_soundfont(filename: &str) {
 }
 
 fn load_preset(channel: i64, preset: i64) {
-	if !check_channel(channel as usize) {
-		return;
-	}
 	let preset = preset as usize;
 	let channel = channel as usize;
+	if !check_channel(channel) {
+		return;
+	}
 	let mut note_info = NOTE_INFO.lock().expect("couldn't lock notes");
 	let mut soundfont = SOUNDFONT.lock().expect("couldn't lock soundfont.");
 	if let Some(sf) = soundfont.as_mut() {
@@ -267,6 +272,20 @@ fn load_preset(channel: i64, preset: i64) {
 		}
 	}
 	
+}
+
+fn set_volume(channel: i64, volume: f64) {
+	let volume = if volume.is_nan() { 0.0 } else { volume as f32 };
+	let mut note_info = NOTE_INFO.lock().expect("couldn't lock notes");
+	if channel == -1 {
+		note_info.master_volume = volume as f32;
+		return;
+	}
+	let channel = channel as usize;
+	if !check_channel(channel) {
+		return;
+	}
+	note_info.channel_volumes[channel] = volume as f32;
 }
 
 fn call_fn_if_exists(engine: &rhai::Engine, ast: &rhai::AST, name: &str, args: impl rhai::FuncArgs) {
@@ -288,6 +307,7 @@ fn playmidi_main() -> Result<(), String> {
 	engine.register_fn("pm_release_note", release_note);
 	engine.register_fn("pm_set_pedal", set_pedal_down);
 	engine.register_fn("pm_bend_pitch", set_pitch_bend);
+	engine.register_fn("pm_set_volume", set_volume);
 	
 	let engine = engine; // de-multablify
 	let mut ast = engine.compile_file("config.rhai".into()).map_err(|e| format!("{}", e))?;
