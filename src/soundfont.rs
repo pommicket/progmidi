@@ -722,7 +722,7 @@ impl SoundFont {
 			if chunk_type == INAM {
 				if chunk_size < 256 {
 					let mut data = vec![0; chunk_size as usize];
-					let _nread = file.read(&mut data)?;
+					file.read_exact(&mut data)?;
 					data.pop(); // null terminator
 					if let Ok(n) = String::from_utf8(data) {
 						name = Some(n);
@@ -1164,7 +1164,7 @@ impl SoundFont {
 
 		for s in sample.data.iter() {
 			let bytes = i16::to_le_bytes(*s);
-			let _nwritten = out.write(&bytes).unwrap();
+			out.write_all(&bytes).unwrap();
 		}
 	}
 
@@ -1302,15 +1302,21 @@ impl SoundFont {
 			let mut falloff = request.falloff;
 			let falloff_mul = f32::powf(request.falloff_speed, (1.0 / sample_rate) as f32);
 			for i in 0..samples.len() / 2 {
-				let mut s = (t * tmul) as u64;
+				let mut s_frac = t * tmul;
+				let mut s = s_frac as u64;
+				s_frac -= s as f64;
 				if zone.loops && s >= startloop {
 					s = (s - startloop) % (endloop - startloop) + startloop;
 				}
-				if s as usize >= data.len() {
+				let s = s as usize;
+				if s + 1 >= data.len() {
 					this_held = false;
 					break;
 				}
-				let mut sample = data[s as usize] as f32;
+				// interpolate between one sample and the next
+				let sample1 = data[s] as f32;
+				let sample2 = data[s + 1] as f32;
+				let mut sample = sample1 + (sample2 - sample1) * (s_frac as f32);
 
 				sample *= falloff;
 				falloff *= falloff_mul;

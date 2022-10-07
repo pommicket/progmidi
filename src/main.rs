@@ -6,12 +6,12 @@ mod midi_input;
 mod soundfont;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use std::fs::File;
 use soundfont::SoundFont;
+use std::ffi::c_int;
+use std::fs::File;
 use std::io::Write;
 use std::sync::{Mutex, MutexGuard};
-use std::time::{Instant, Duration};
-use std::ffi::c_int;
+use std::time::{Duration, Instant};
 
 const NOTE_FALLOFF: f32 = 0.1; // falloff when note is released
 const CHANNEL_COUNT: usize = 17; // 16 MIDI channels + metronome
@@ -37,7 +37,7 @@ struct MidiRecording {
 }
 
 struct WavRecording {
-	data: Vec<i16>
+	data: Vec<i16>,
 }
 
 struct NoteInfo {
@@ -98,7 +98,7 @@ impl MidiRecording {
 			data: Vec::with_capacity(1000),
 		}
 	}
-	
+
 	fn write(&mut self, byte: u8) {
 		self.data.push(byte);
 	}
@@ -119,7 +119,7 @@ impl MidiRecording {
 			self.write((value & 0x7f) as u8);
 		}
 	}
-	
+
 	fn write_event(&mut self, status: u8, data1: Option<u8>, data2: Option<u8>) {
 		// check data
 		if let Some(b) = data1 {
@@ -132,7 +132,7 @@ impl MidiRecording {
 				return;
 			}
 		}
-		
+
 		let now = Instant::now();
 		let ms_elapsed = now.duration_since(self.last_event_time).as_millis();
 		self.write_vlq(ms_elapsed as u32);
@@ -145,7 +145,7 @@ impl MidiRecording {
 		}
 		self.last_event_time = now;
 	}
-	
+
 	fn save(&self, filename: &str) -> std::io::Result<()> {
 		print!("Saving MIDI recording...");
 		flush_stdout();
@@ -153,22 +153,22 @@ impl MidiRecording {
 			.write(true)
 			.create_new(true)
 			.open(filename)?;
-		file.write("MThd".as_bytes())?;
+		file.write_all("MThd".as_bytes())?;
 		write_u32_be(&mut file, 6)?; // header size
 		write_u16_be(&mut file, 1)?; // <format> = 1
 		write_u16_be(&mut file, 1)?; // <ntrks> = 1
-		// tick = 1ms, quarter note = 600 ticks => 100bpm
+							 // tick = 1ms, quarter note = 600 ticks => 100bpm
 		write_u16_be(&mut file, 600)?;
-		file.write("MTrk".as_bytes())?;
-		
+		file.write_all("MTrk".as_bytes())?;
+
 		// MIDI "track end"
 		// (people complain if we don't include this)
 		let track_end = [0, 0xff, 0x2f, 0];
-		
+
 		write_u32_be(&mut file, (self.data.len() + track_end.len()) as u32)?; // track size
-		file.write(&self.data)?;
-		file.write(&track_end)?;
-		
+		file.write_all(&self.data)?;
+		file.write_all(&track_end)?;
+
 		file.sync_all()?;
 		println!("\rMIDI recording saved to {}", filename);
 		Ok(())
@@ -181,7 +181,7 @@ impl WavRecording {
 			data: Vec::with_capacity(441000),
 		}
 	}
-	
+
 	fn write(&mut self, samples: &[i16]) {
 		if samples.len() + self.data.len() > (u32::MAX / 2 - 100) as usize {
 			// too much data for wav file
@@ -191,25 +191,22 @@ impl WavRecording {
 			self.data.push(*x);
 		}
 	}
-	
-	 fn save(&self, filename: &str, sample_rate: u32) -> std::io::Result<()> {
+
+	fn save(&self, filename: &str, sample_rate: u32) -> std::io::Result<()> {
 		print!("Saving WAV recording...");
 		// rust doesn't seem to be able to optimize out
 		// a i16::to_le_bytes loop. annoying.
 		let data8 = unsafe {
-			std::slice::from_raw_parts(
-				self.data.as_ptr() as *const u8,
-				2 * self.data.len()
-			)
+			std::slice::from_raw_parts(self.data.as_ptr() as *const u8, 2 * self.data.len())
 		};
 		flush_stdout();
 		let mut file = std::fs::OpenOptions::new()
 			.write(true)
 			.create_new(true)
 			.open(filename)?;
-		file.write("RIFF".as_bytes())?;
+		file.write_all("RIFF".as_bytes())?;
 		write_u32_le(&mut file, 36 + data8.len() as u32)?; // RIFF chunk size
-		file.write("WAVEfmt ".as_bytes())?;
+		file.write_all("WAVEfmt ".as_bytes())?;
 		write_u32_le(&mut file, 16)?; // fmt  chunk size
 		write_u16_le(&mut file, 1)?; // PCM
 		write_u16_le(&mut file, 2)?; // 2 channels
@@ -217,13 +214,13 @@ impl WavRecording {
 		write_u32_le(&mut file, sample_rate * 4)?; // "byte rate"
 		write_u16_le(&mut file, 4)?; // block align
 		write_u16_le(&mut file, 16)?; // bits per sample
-		file.write("data".as_bytes())?;
+		file.write_all("data".as_bytes())?;
 		write_u32_le(&mut file, data8.len() as u32)?; // data chunk size
-		file.write(data8)?;
+		file.write_all(data8)?;
 		file.sync_all()?;
 		println!("\rWAV recording saved to {}", filename);
 		Ok(())
-	 }
+	}
 }
 
 fn flush_stdout() {
@@ -232,18 +229,18 @@ fn flush_stdout() {
 	}
 }
 
-fn write_u16_be(file: &mut File, n: u16) -> std::io::Result<usize> {
-	file.write(&mut u16::to_be_bytes(n))
+fn write_u16_be(file: &mut File, n: u16) -> std::io::Result<()> {
+	file.write_all(&u16::to_be_bytes(n))
 }
-fn write_u32_be(file: &mut File, n: u32) -> std::io::Result<usize> {
-	file.write(&mut u32::to_be_bytes(n))
+fn write_u32_be(file: &mut File, n: u32) -> std::io::Result<()> {
+	file.write_all(&u32::to_be_bytes(n))
 }
 
-fn write_u16_le(file: &mut File, n: u16) -> std::io::Result<usize> {
-	file.write(&mut u16::to_le_bytes(n))
+fn write_u16_le(file: &mut File, n: u16) -> std::io::Result<()> {
+	file.write_all(&u16::to_le_bytes(n))
 }
-fn write_u32_le(file: &mut File, n: u32) -> std::io::Result<usize> {
-	file.write(&mut u32::to_le_bytes(n))
+fn write_u32_le(file: &mut File, n: u32) -> std::io::Result<()> {
+	file.write_all(&u32::to_le_bytes(n))
 }
 
 fn lock_note_info<'a>() -> MutexGuard<'a, NoteInfo> {
@@ -254,7 +251,8 @@ fn lock_soundfont<'a>() -> MutexGuard<'a, Option<SoundFont>> {
 	SOUNDFONT.lock().expect("couldn't lock soundfont")
 }
 
-fn lock_note_info_and_soundfont<'a>() -> (MutexGuard<'a, NoteInfo>, MutexGuard<'a, Option<SoundFont>>) {
+fn lock_note_info_and_soundfont<'a>(
+) -> (MutexGuard<'a, NoteInfo>, MutexGuard<'a, Option<SoundFont>>) {
 	let note_info = lock_note_info();
 	let soundfont = lock_soundfont();
 	(note_info, soundfont)
@@ -315,22 +313,24 @@ fn get_audio_stream() -> Result<(cpal::Stream, u32), String> {
 		.supported_output_configs()
 		.expect("error while querying configs");
 	let mut chosen_config = None;
+	let srate = 44100;
 	for config in supported_configs {
-		if config.channels() != 2 || config.sample_format() != cpal::SampleFormat::I16 {
+		if config.channels() != 2
+			|| config.sample_format() != cpal::SampleFormat::I16
+			|| config.min_sample_rate().0 > srate
+			|| config.max_sample_rate().0 < srate
+		{
 			continue;
 		}
 		chosen_config = Some(config);
 	}
 	let chosen_config = match chosen_config {
-		None => {
-			return Err("Couldn't configure audio device.".to_string())
-		}
+		None => return Err("Couldn't get desired audio properties.".to_string()),
 		Some(x) => x,
 	};
-	// @TODO  why do low sample rates sound bad
-	///     switch to f32 samples?
-	let supp_config: cpal::SupportedStreamConfig = chosen_config.with_max_sample_rate();
-	if supp_config.channels() != 2 {}
+
+	let supp_config: cpal::SupportedStreamConfig =
+		chosen_config.with_sample_rate(cpal::SampleRate(srate));
 	let config = supp_config.into();
 
 	let stream = audio_device
@@ -393,7 +393,7 @@ fn play_note(channel: i64, note: i64, vel: i64) {
 	}
 
 	let (mut note_info, mut maybe_sf) = lock_note_info_and_soundfont();
-	
+
 	if channel < 16 {
 		if let Some(recording) = note_info.midi_recording.as_mut() {
 			// note on event
@@ -425,14 +425,14 @@ fn release_note(channel: i64, note: i64) {
 	let note = note as u8;
 
 	let mut note_info = lock_note_info();
-	
+
 	if channel < 16 {
 		if let Some(recording) = note_info.midi_recording.as_mut() {
 			// note off event
 			recording.write_event(0b1000_0000 | (channel as u8), Some(note), Some(0));
 		}
 	}
-	
+
 	let pedal_down = note_info.pedal_down;
 	let notes = &mut note_info.notes[channel];
 	if let Some(n) = notes.iter_mut().find(|n| n.key == note && n.down) {
@@ -472,9 +472,6 @@ fn set_pitch_bend(amount: f64) {
 
 fn load_soundfont(filename: &str) {
 	if let Ok(sf) = SoundFont::open(filename) {
-		for i in 0..sf.preset_count() {
-			println!("{}. {}", i, sf.preset_name(i).unwrap());
-		}
 		let mut sflock = lock_soundfont();
 		*sflock = Some(sf);
 	} else {
@@ -482,9 +479,17 @@ fn load_soundfont(filename: &str) {
 	}
 }
 
+fn print_presets() {
+	if let Some(sf) = lock_soundfont().as_ref() {
+		for i in 0..sf.preset_count() {
+			println!("{}. {}", i, sf.preset_name(i).unwrap());
+		}
+	}
+}
+
 fn load_preset(channel: i64, preset: i64) {
 	let preset = preset as usize;
-	
+
 	let (mut note_info, mut soundfont) = lock_note_info_and_soundfont();
 	if channel == -1 {
 		for p in note_info.presets.iter_mut() {
@@ -497,14 +502,12 @@ fn load_preset(channel: i64, preset: i64) {
 		}
 		note_info.presets[channel] = preset;
 	}
-	
+
 	if let Some(sf) = soundfont.as_mut() {
 		if preset >= sf.preset_count() {
 			eprintln!("preset {} out of range", preset);
-		} else {
-			if let Err(e) = sf.load_samples_for_preset(preset) {
-				eprintln!("error loading preset {}: {}", preset, e);
-			}
+		} else if let Err(e) = sf.load_samples_for_preset(preset) {
+			eprintln!("error loading preset {}: {}", preset, e);
 		}
 	}
 }
@@ -542,7 +545,9 @@ fn stop_midi_recording_err() -> std::io::Result<()> {
 	let mut note_info = lock_note_info();
 	if let Some(recording) = note_info.midi_recording.take() {
 		drop(note_info);
-		let name = chrono::Local::now().format("%Y-%m-%d-%H-%M-%S.mid").to_string();
+		let name = chrono::Local::now()
+			.format("%Y-%m-%d-%H-%M-%S.mid")
+			.to_string();
 		recording.save(&name)?;
 	}
 	Ok(())
@@ -565,7 +570,9 @@ fn stop_wav_recording_err() -> std::io::Result<()> {
 	if let Some(recording) = note_info.wav_recording.take() {
 		let sample_rate = note_info.output_sample_rate;
 		drop(note_info);
-		let name = chrono::Local::now().format("%Y-%m-%d-%H-%M-%S.wav").to_string();
+		let name = chrono::Local::now()
+			.format("%Y-%m-%d-%H-%M-%S.wav")
+			.to_string();
 		recording.save(&name, sample_rate)?;
 	}
 	Ok(())
@@ -595,10 +602,9 @@ fn call_fn_if_exists(
 	}
 }
 
-
 const SIGINT: c_int = 2;
 
-type SigHandler = extern "C" fn (c_int);
+type SigHandler = extern "C" fn(c_int);
 
 extern "C" {
 	fn signal(signum: c_int, handler: SigHandler) -> SigHandler;
@@ -612,10 +618,11 @@ extern "C" fn sig_handler(_signum: c_int) {
 
 fn main() {
 	unsafe { signal(SIGINT, sig_handler) };
-	
+
 	let mut engine = rhai::Engine::new();
 	engine.set_max_expr_depths(0, 0);
 	engine.register_fn("pm_load_soundfont", load_soundfont);
+	engine.register_fn("pm_print_presets", print_presets);
 	engine.register_fn("pm_load_preset", load_preset);
 	engine.register_fn("pm_play_note", play_note);
 	engine.register_fn("pm_release_note", release_note);
@@ -635,26 +642,29 @@ fn main() {
 	let engine = engine; // de-multablify
 	let args: Vec<String> = std::env::args().collect();
 	let config_filename = match args.len() {
-		 0 | 1 => "config.rhai",
-		 2 => &args[1],
-		 _ => {
-		 	eprintln!("Usage: {} [config file]", args[0]);
-		 	return;
-		 }
+		0 | 1 => "config.rhai",
+		2 => &args[1],
+		_ => {
+			eprintln!("Usage: {} [config file]", args[0]);
+			return;
+		}
 	};
 	let mut ast = match engine.compile_file(config_filename.into()) {
 		Ok(x) => x,
 		Err(e) => {
 			eprintln!("Config error: {}", e);
 			return;
-		},
+		}
 	};
-	
+
 	if let Err(e) = engine.run_ast(&ast) {
-		eprintln!("Error running top-level statements in {}: {}", config_filename, e);
+		eprintln!(
+			"Error running top-level statements in {}: {}",
+			config_filename, e
+		);
 		return;
 	}
-	
+
 	let mut midi_device;
 	{
 		let mut idx = -1;
@@ -689,12 +699,12 @@ fn main() {
 			return;
 		}
 	};
-	
+
 	{
 		let mut note_info = lock_note_info();
 		note_info.output_sample_rate = sample_rate;
 	}
-	
+
 	if let Err(e) = stream.play() {
 		eprintln!("Error starting audio stream: {}", e);
 		return;
