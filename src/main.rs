@@ -13,7 +13,6 @@ use std::io::Write;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-const NOTE_FALLOFF: f32 = 0.1; // falloff when note is released
 const CHANNEL_COUNT: usize = 17; // 16 MIDI channels + metronome
 const METRONOME_CHANNEL: i64 = 16;
 
@@ -21,6 +20,9 @@ struct Note {
 	key: u8,
 	req: soundfont::SamplesRequest,
 	down: bool,
+	// if user plays A4, then A4 again, the first A4 will get this (it will be cut out quickly,
+	// but not instantaneously to avoid clicking)
+	cut: bool,
 	kill: bool, // only used briefly
 }
 
@@ -28,7 +30,6 @@ struct Note {
 struct Metronome {
 	bpm: f32,
 	key: i64,
-	volume: f32,
 }
 
 struct MidiRecording {
@@ -51,6 +52,7 @@ struct NoteInfo {
 	channel_volumes: [f32; CHANNEL_COUNT],
 	master_volume: f32,
 	metronome: Metronome,
+	release_falloff: f32, // falloff when a note is released
 }
 
 static NOTE_INFO: Mutex<NoteInfo> = Mutex::new(NoteInfo {
@@ -82,13 +84,17 @@ static NOTE_INFO: Mutex<NoteInfo> = Mutex::new(NoteInfo {
 	presets: [0; CHANNEL_COUNT],
 	channel_volumes: [1.0; CHANNEL_COUNT],
 	master_volume: 1.0,
+	release_falloff: 0.1,
 	metronome: Metronome {
 		bpm: 0.0,
 		key: 0,
-		volume: 0.0,
 	},
 });
 
+// unfortunately, this needs to be a separate mutex because otherwise
+// we would get double mutable borrows. sometimes we only need one of
+// the note_info / soundfont, so it might actually be slightly better
+// this way.
 static SOUNDFONT: Mutex<Option<SoundFont>> = Mutex::new(None);
 
 impl MidiRecording {
@@ -351,6 +357,9 @@ fn get_audio_stream() -> Result<(cpal::Stream, u32), String> {
 						for note in notes.iter_mut() {
 							note.req.set_tune(pitch_bend as i32);
 							note.req.set_volume(volume);
+							if note.cut {
+								note.req.set_falloff(0.01);
+							}
 							match sf.add_samples_interlaced(&mut note.req, data, sample_rate) {
 								Ok(true) => {}
 								Ok(false) => note.kill = true,
@@ -400,7 +409,12 @@ fn play_note(channel: i64, note: i64, vel: i64) {
 			recording.write_event(0b1001_0000 | (channel as u8), Some(note), Some(vel));
 		}
 	}
-	note_info.notes[channel].retain(|n| n.key != note);
+	for n in note_info.notes[channel].iter_mut() {
+		if n.key == note {
+			n.cut = true;
+		}
+	}
+	
 	let preset = note_info.presets[channel];
 	if let Some(sf) = maybe_sf.as_mut() {
 		match sf.request(preset, note, vel) {
@@ -409,6 +423,7 @@ fn play_note(channel: i64, note: i64, vel: i64) {
 					key: note,
 					req,
 					down: true,
+					cut: false,
 					kill: false,
 				});
 			}
@@ -434,11 +449,14 @@ fn release_note(channel: i64, note: i64) {
 	}
 
 	let pedal_down = note_info.pedal_down;
+	let release_falloff = note_info.release_falloff;
 	let notes = &mut note_info.notes[channel];
-	if let Some(n) = notes.iter_mut().find(|n| n.key == note && n.down) {
-		n.down = false;
-		if !pedal_down {
-			n.req.set_falloff(NOTE_FALLOFF);
+	for n in notes.iter_mut() {
+		if n.key == note {
+			n.down = false;
+			if !pedal_down {
+				n.req.set_falloff(release_falloff);
+			}
 		}
 	}
 }
@@ -447,6 +465,7 @@ fn set_pedal_down(down: bool) {
 	let mut note_info = lock_note_info();
 	note_info.pedal_down = down;
 	for channel in 0..CHANNEL_COUNT {
+		let release_falloff = note_info.release_falloff;
 		let notes = &mut note_info.notes[channel];
 		if down {
 			// disable falloff for all notes
@@ -457,7 +476,7 @@ fn set_pedal_down(down: bool) {
 			// start falloff for all non-down notes
 			for note in notes.iter_mut() {
 				if !note.down {
-					note.req.set_falloff(NOTE_FALLOFF);
+					note.req.set_falloff(release_falloff);
 				}
 			}
 		}
@@ -468,6 +487,11 @@ fn set_pitch_bend(amount: f64) {
 	let amount = amount as i32;
 	let mut note_info = lock_note_info();
 	note_info.pitch_bend = amount;
+}
+
+fn set_release_falloff(falloff: f64) {
+	let mut note_info = lock_note_info();
+	note_info.release_falloff = falloff as f32;
 }
 
 fn load_soundfont(filename: &str) {
@@ -491,24 +515,64 @@ fn load_preset(channel: i64, preset: i64) {
 	let preset = preset as usize;
 
 	let (mut note_info, mut soundfont) = lock_note_info_and_soundfont();
-	if channel == -1 {
-		for p in note_info.presets.iter_mut() {
-			*p = preset;
-		}
-	} else {
-		let channel = channel as usize;
-		if !check_channel(channel) {
-			return;
-		}
-		note_info.presets[channel] = preset;
-	}
 
 	if let Some(sf) = soundfont.as_mut() {
 		if preset >= sf.preset_count() {
 			eprintln!("preset {} out of range", preset);
-		} else if let Err(e) = sf.load_samples_for_preset(preset) {
-			eprintln!("error loading preset {}: {}", preset, e);
+		} else {
+			if let Err(e) = sf.load_samples_for_preset(preset) {
+				eprintln!("error loading preset {}: {}", preset, e);
+			}
+			
+			if channel == -1 {
+				for p in note_info.presets.iter_mut() {
+					*p = preset;
+				}
+			} else {
+				let channel = channel as usize;
+				if !check_channel(channel) {
+					return;
+				}
+				note_info.presets[channel] = preset;
+			}
 		}
+	} else {
+		eprintln!("Can't load preset {} since no soundfont is loaded", preset);
+	}
+}
+
+fn load_preset_by_name(channel: i64, name: &str) {
+	let mut preset_names;
+	{
+		if let Some(soundfont) = lock_soundfont().as_ref() {
+			preset_names = Vec::with_capacity(soundfont.preset_count());
+			for i in 0..soundfont.preset_count() {
+				let pname = soundfont.preset_name(i).unwrap().to_lowercase();
+				if pname.contains(name) {
+					preset_names.push((i, pname));
+				}
+			}
+		} else {
+			eprintln!("Can't load preset \"{}\", since no soundfont is loaded.", name);
+			return;
+		}
+	}
+	preset_names.sort_by(|(_, a),(_, b)| {
+		use std::cmp::Ordering::*;
+		if a.len() < b.len() {
+			Less
+		} else if a.len() > b.len() {
+			Greater
+		} else if a < b {
+			Less
+		} else if a > b {
+			Greater
+		} else {
+			Equal
+		}
+	});
+	if !preset_names.is_empty() {
+		load_preset(channel, preset_names[0].0 as i64);
 	}
 }
 
@@ -526,12 +590,11 @@ fn set_volume(channel: i64, volume: f64) {
 	note_info.channel_volumes[channel] = volume as f32;
 }
 
-fn set_metronome(key: i64, bpm: f64, volume: f64) {
+fn set_metronome(key: i64, bpm: f64) {
 	let mut note_info = lock_note_info();
 	note_info.metronome = Metronome {
 		key,
 		bpm: bpm as f32,
-		volume: volume as f32,
 	}
 }
 
@@ -624,15 +687,26 @@ fn main() {
 	engine.register_fn("pm_load_soundfont", load_soundfont);
 	engine.register_fn("pm_print_presets", print_presets);
 	engine.register_fn("pm_load_preset", load_preset);
+	engine.register_fn("pm_load_preset", load_preset_by_name);
 	engine.register_fn("pm_play_note", play_note);
 	engine.register_fn("pm_release_note", release_note);
 	engine.register_fn("pm_set_pedal", set_pedal_down);
 	engine.register_fn("pm_bend_pitch", set_pitch_bend);
+	engine.register_fn("pm_bend_pitch", |bend: i64| {
+		set_pitch_bend(bend as f64);
+	});
 	engine.register_fn("pm_set_volume", set_volume);
+	engine.register_fn("pm_set_volume", |channel: i64, volume: i64| {
+		set_volume(channel, volume as f64);
+	});
 	engine.register_fn("pm_set_metronome", set_metronome);
 	// allow integer bpm as well
-	engine.register_fn("pm_set_metronome", |key: i64, bpm: i64, volume: f64| {
-		set_metronome(key, bpm as f64, volume);
+	engine.register_fn("pm_set_metronome", |key: i64, bpm: i64| {
+		set_metronome(key, bpm as f64);
+	});
+	engine.register_fn("pm_set_release_falloff", set_release_falloff);
+	engine.register_fn("pm_set_release_falloff", |f: i64| {
+		set_release_falloff(f as f64);
 	});
 	engine.register_fn("pm_start_midi_recording", start_midi_recording);
 	engine.register_fn("pm_stop_midi_recording", stop_midi_recording);
@@ -724,7 +798,7 @@ fn main() {
 			play_note(
 				METRONOME_CHANNEL,
 				metronome.key,
-				(metronome.volume * 127.0) as i64,
+				127
 			);
 			last_metronome_tick = Instant::now();
 		}

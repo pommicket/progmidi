@@ -191,7 +191,7 @@ mod vorbis {
 			Err("bad vorbis file".to_string())
 		} else {
 			let samples = samples as usize;
-			let mut vec = Vec::with_capacity(samples);
+			let mut vec = Vec::with_capacity(samples + 1);
 			for i in 0..samples {
 				vec.push(unsafe { *output.add(i) });
 			}
@@ -289,15 +289,17 @@ impl Sample {
 					file.read_exact(&mut data8)?;
 					match file_type {
 						FileType::SF2 => {
-							self.data = vec![0i16; len];
+							self.data = Vec::with_capacity(len + 1);
 							for i in 0..len as usize {
-								self.data[i] = i16::from_le_bytes([data8[2 * i], data8[2 * i + 1]]);
+								self.data.push(i16::from_le_bytes([data8[2 * i], data8[2 * i + 1]]));
 							}
 						}
 						FileType::SF3 => {
 							self.data = vorbis::decode(&data8).map_err(SampleError::Vorbis)?;
 						}
 					}
+					// (***) add an extra sample to the end to prevent OOB
+					self.data.push(self.data[self.data.len() - 1]);
 					Ok(())
 				}
 			}
@@ -948,10 +950,10 @@ impl SoundFont {
 
 			let start = read_u32(&mut file)?;
 			let end = read_u32(&mut file)?;
-			if end < start {
+			if end <= start {
 				return Err(OpenError::BadSoundFont(format!(
 					"sample starts at {}, and ends before then (at {})",
-					start, end
+					start, end as i64 - 1
 				)));
 			}
 			let mut startloop = read_u32(&mut file)?;
@@ -1314,6 +1316,8 @@ impl SoundFont {
 					break;
 				}
 				// interpolate between one sample and the next
+				// note: it's okay to do this even for samples where endloop = end, because
+				//       we added an additional sample to the end -- see (***)
 				let sample1 = data[s] as f32;
 				let sample2 = data[s + 1] as f32;
 				let mut sample = sample1 + (sample2 - sample1) * (s_frac as f32);
