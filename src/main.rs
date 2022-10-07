@@ -185,13 +185,13 @@ impl WavRecording {
 		}
 	}
 
-	fn write(&mut self, samples: &[i16]) {
+	fn write(&mut self, samples: &[f32]) {
 		if samples.len() + self.data.len() > (u32::MAX / 2 - 100) as usize {
 			// too much data for wav file
 			return;
 		}
 		for x in samples {
-			self.data.push(*x);
+			self.data.push(((*x) * 32767.0) as i16);
 		}
 	}
 
@@ -316,22 +316,46 @@ fn get_audio_stream() -> Result<(cpal::Stream, u32), String> {
 		.supported_output_configs()
 		.expect("error while querying configs");
 	let mut chosen_config = None;
-	let srate = 44100;
+	
+	// get audio configuration with 2-channel float audio,
+	// and as close to 44100Hz sample rate as possible.
+	let desired_srate = 44100;
+	let best_dist = u32::MAX;
 	for config in supported_configs {
 		if config.channels() != 2
-			|| config.sample_format() != cpal::SampleFormat::I16
-			|| config.min_sample_rate().0 > srate
-			|| config.max_sample_rate().0 < srate
-		{
+			|| config.sample_format() != cpal::SampleFormat::F32 {
 			continue;
 		}
-		chosen_config = Some(config);
+		let min_srate = config.min_sample_rate().0;
+		let max_srate = config.max_sample_rate().0;
+		let dist = if min_srate > desired_srate {
+			min_srate - desired_srate
+		} else if max_srate < desired_srate {
+			desired_srate - max_srate
+		} else {
+			0
+		};
+		if dist < best_dist {
+			chosen_config = Some(config);
+		}
 	}
 	let chosen_config = match chosen_config {
 		None => return Err("Couldn't get desired audio properties.".to_string()),
 		Some(x) => x,
 	};
-
+	
+	let srate = {
+		let min_srate = chosen_config.min_sample_rate().0;
+		let max_srate = chosen_config.max_sample_rate().0;
+		if min_srate > desired_srate {
+			min_srate
+		} else if max_srate < desired_srate {
+			max_srate
+		} else {
+			desired_srate
+		}
+	};
+	
 	let supp_config: cpal::SupportedStreamConfig =
 		chosen_config.with_sample_rate(cpal::SampleRate(srate));
 	let config = supp_config.into();
@@ -339,12 +363,12 @@ fn get_audio_stream() -> Result<(cpal::Stream, u32), String> {
 	let stream = audio_device
 		.build_output_stream(
 			&config,
-			move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
+			move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
 				let (mut note_info, mut maybe_sf) = lock_note_info_and_soundfont();
 				if let Some(sf) = maybe_sf.as_mut() {
 					let sample_rate = config.sample_rate.0 as f64;
 					for x in data.iter_mut() {
-						*x = 0;
+						*x = 0.0;
 					}
 					let pitch_bend = note_info.pitch_bend;
 					for channel in 0..CHANNEL_COUNT {
@@ -782,9 +806,6 @@ fn main() {
 		};
 	}
 	
-	let mut this = rhai::Dynamic::from(rhai::Map::new());
-	call_fn_if_exists(&engine, &ast, &mut this, "pm_start", ());
-
 	let (stream, sample_rate) = match get_audio_stream() {
 		Ok(s) => s,
 		Err(e) => {
@@ -797,6 +818,10 @@ fn main() {
 		let mut note_info = lock_note_info();
 		note_info.output_sample_rate = sample_rate;
 	}
+
+	
+	let mut this = rhai::Dynamic::from(rhai::Map::new());
+	call_fn_if_exists(&engine, &ast, &mut this, "pm_start", ());
 
 	if let Err(e) = stream.play() {
 		eprintln!("Error starting audio stream: {}", e);

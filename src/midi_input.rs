@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 /// Query and read from MIDI input devices.
 /// Basic usage:
@@ -22,6 +23,7 @@ use std::sync::Mutex;
 // a big deal to add it as a dependency
 // (we only really need it for size_t, ssize_t)
 extern crate libc;
+#[cfg(unix)]
 use libc::{free, size_t, ssize_t};
 
 // (snd_rawmidi_t is an opaque struct)

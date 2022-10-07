@@ -1215,14 +1215,14 @@ impl SoundFont {
 		})
 	}
 
-	/// adds sample data to `samples` which is an i16 slice containing samples LRLRLRLR...
+	/// adds sample data to `samples` which is an f32 slice containing samples LRLRLRLR...
 	///   (`samples` should have even length)
 	/// volume (0 to 1) = volume of max velocity note.
 	/// returns `Ok(true)` if the note should still be held. increments `request.hold_time` as needed.
 	pub fn add_samples_interlaced(
 		&mut self,
 		request: &mut SamplesRequest,
-		samples: &mut [i16],
+		samples: &mut [f32],
 		sample_rate: f64,
 	) -> Result<bool, SampleError> {
 		let key = request.key;
@@ -1320,19 +1320,20 @@ impl SoundFont {
 				// interpolate between one sample and the next
 				// note: it's okay to do this even for samples where endloop = end, because
 				//       we added an additional sample to the end -- see (***)
-				let sample1 = data[s] as f32;
-				let sample2 = data[s + 1] as f32;
+				let sample1 = (data[s] as f32) * (1.0 / 32767.0);
+				let sample2 = (data[s + 1] as f32) * (1.0 / 32767.0);
 				let mut sample = sample1 + (sample2 - sample1) * (s_frac as f32);
 
 				sample *= falloff;
 				falloff *= falloff_mul;
-				samples[2 * i] += (amplitude * sample * (1.0 - pan)) as i16;
-				samples[2 * i + 1] += (amplitude * sample * pan) as i16;
+				samples[2 * i] += amplitude * sample * (1.0 - pan);
+				samples[2 * i + 1] += amplitude * sample * pan;
 				t += t_inc;
 			}
 
 			request.falloff = falloff;
 			if falloff * request.volume < 1.0 / 32767.0 {
+				// no longer audible
 				this_held = false;
 			}
 			final_t = f64::max(final_t, t);

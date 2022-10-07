@@ -1,6 +1,6 @@
 # progmidi
 
-A programmable MIDI keyboard audio synthesizer.
+A programmable MIDI keyboard-controlled audio synthesizer.
 
 Check out the [releases](https://github.com/pommicket/progmidi/releases)
 for Windows and Linux executables.
@@ -21,11 +21,7 @@ Musescore has a very extensive soundfont file.
 According to [this web page](https://musescore.org/en/handbook/3/soundfonts-and-sfz-files),
 after installing musescore, the soundfont will be located here:
 
-Windows x86 (32-bit) / MuseScore x86: `%ProgramFiles%\MuseScore 3\sound\MuseScore_General.sf3`
-
-Windows x64 (64-bit) / MuseScore x86: `%ProgramFiles(x86)%\MuseScore 3\sound\MuseScore_General.sf3`
-
-Windows x64 (64-bit) / MuseScore x86\_64: `%ProgramFiles%\MuseScore 3\sound\MuseScore_General.sf3`
+Windows: `%ProgramFiles%\MuseScore 3\sound\MuseScore_General.sf3`
 
 macOS: `/Applications/MuseScore 3.app/Contents/Resources/sound/MuseScore_General.sf3`
 
