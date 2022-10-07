@@ -85,10 +85,7 @@ static NOTE_INFO: Mutex<NoteInfo> = Mutex::new(NoteInfo {
 	channel_volumes: [1.0; CHANNEL_COUNT],
 	master_volume: 1.0,
 	release_falloff: 0.1,
-	metronome: Metronome {
-		bpm: 0.0,
-		key: 0,
-	},
+	metronome: Metronome { bpm: 0.0, key: 0 },
 });
 
 // unfortunately, this needs to be a separate mutex because otherwise
@@ -414,7 +411,7 @@ fn play_note(channel: i64, note: i64, vel: i64) {
 			n.cut = true;
 		}
 	}
-	
+
 	let preset = note_info.presets[channel];
 	if let Some(sf) = maybe_sf.as_mut() {
 		match sf.request(preset, note, vel) {
@@ -523,7 +520,7 @@ fn load_preset(channel: i64, preset: i64) {
 			if let Err(e) = sf.load_samples_for_preset(preset) {
 				eprintln!("error loading preset {}: {}", preset, e);
 			}
-			
+
 			if channel == -1 {
 				for p in note_info.presets.iter_mut() {
 					*p = preset;
@@ -553,11 +550,14 @@ fn load_preset_by_name(channel: i64, name: &str) {
 				}
 			}
 		} else {
-			eprintln!("Can't load preset \"{}\", since no soundfont is loaded.", name);
+			eprintln!(
+				"Can't load preset \"{}\", since no soundfont is loaded.",
+				name
+			);
 			return;
 		}
 	}
-	preset_names.sort_by(|(_, a),(_, b)| {
+	preset_names.sort_by(|(_, a), (_, b)| {
 		use std::cmp::Ordering::*;
 		if a.len() < b.len() {
 			Less
@@ -650,12 +650,15 @@ fn stop_wav_recording() {
 fn call_fn_if_exists(
 	engine: &rhai::Engine,
 	ast: &rhai::AST,
+	this: &mut rhai::Dynamic,
 	name: &str,
 	args: impl rhai::FuncArgs,
 ) {
+	let mut arg_vec = vec![];
+	args.parse(&mut arg_vec);
 	let mut scope = rhai::Scope::new();
 	match engine
-		.call_fn::<()>(&mut scope, ast, name, args)
+		.call_fn_raw(&mut scope, ast, true, false, name, Some(this), &mut arg_vec)
 		.map_err(|e| *e)
 	{
 		Ok(_) => {}
@@ -674,13 +677,18 @@ extern "C" {
 }
 
 extern "C" fn sig_handler(_signum: c_int) {
-	stop_midi_recording();
-	stop_wav_recording();
-	std::process::exit(0);
+	// do this in a separate thread in case note_info is locked in this thread
+	std::thread::spawn(|| {
+		stop_midi_recording();
+		stop_wav_recording();
+		std::process::exit(0);
+	});
 }
 
 fn main() {
 	unsafe { signal(SIGINT, sig_handler) };
+	
+	let application_start = Instant::now();
 
 	let mut engine = rhai::Engine::new();
 	engine.set_max_expr_depths(0, 0);
@@ -712,7 +720,19 @@ fn main() {
 	engine.register_fn("pm_stop_midi_recording", stop_midi_recording);
 	engine.register_fn("pm_start_wav_recording", start_wav_recording);
 	engine.register_fn("pm_stop_wav_recording", stop_wav_recording);
-
+	engine.register_fn("pm_print", |s: &str| {
+		print!("{s}");
+		if std::io::stdout().flush().is_err() {
+			// whatever
+		}
+	});
+	engine.register_fn("pm_get_time", move || -> i64 {
+		Instant::now().duration_since(application_start)
+			.as_millis()
+			.try_into()
+			.expect("i'm gonna stop you right there. you've been running this program for HOW LONG?")
+	});
+	
 	let engine = engine; // de-multablify
 	let args: Vec<String> = std::env::args().collect();
 	let config_filename = match args.len() {
@@ -723,7 +743,7 @@ fn main() {
 			return;
 		}
 	};
-	let mut ast = match engine.compile_file(config_filename.into()) {
+	let ast = match engine.compile_file(config_filename.into()) {
 		Ok(x) => x,
 		Err(e) => {
 			eprintln!("Config error: {}", e);
@@ -761,11 +781,10 @@ fn main() {
 			}
 		};
 	}
+	
+	let mut this = rhai::Dynamic::from(rhai::Map::new());
+	call_fn_if_exists(&engine, &ast, &mut this, "pm_start", ());
 
-	// without this, top-level statements will be executed each time a function is called
-	ast.clear_statements();
-
-	let ast = ast; // de-mutablify
 	let (stream, sample_rate) = match get_audio_stream() {
 		Ok(s) => s,
 		Err(e) => {
@@ -795,11 +814,7 @@ fn main() {
 			metronome = note_info.metronome.clone();
 		}
 		if metronome.bpm > 0.0 && metronome_time >= 60.0 / metronome.bpm {
-			play_note(
-				METRONOME_CHANNEL,
-				metronome.key,
-				127
-			);
+			play_note(METRONOME_CHANNEL, metronome.key, 127);
 			last_metronome_tick = Instant::now();
 		}
 
@@ -809,18 +824,20 @@ fn main() {
 				NoteOn { channel, note, vel } => call_fn_if_exists(
 					&engine,
 					&ast,
+					&mut this,
 					"pm_note_played",
 					(channel as i64, note as i64, vel as i64),
 				),
 				NoteOff { channel, note, vel } => call_fn_if_exists(
 					&engine,
 					&ast,
+					&mut this,
 					"pm_note_released",
 					(channel as i64, note as i64, vel as i64),
 				),
 				PitchBend { channel, amount } => {
 					let amount = (amount as f64 - 8192.0) * (1.0 / 8192.0);
-					call_fn_if_exists(&engine, &ast, "pm_pitch_bent", (channel as i64, amount));
+					call_fn_if_exists(&engine, &ast, &mut this, "pm_pitch_bent", (channel as i64, amount));
 				}
 				ControlChange {
 					channel,
@@ -830,6 +847,7 @@ fn main() {
 					call_fn_if_exists(
 						&engine,
 						&ast,
+						&mut this,
 						"pm_control_changed",
 						(channel as i64, controller as i64, value as i64),
 					);

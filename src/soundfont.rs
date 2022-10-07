@@ -291,7 +291,8 @@ impl Sample {
 						FileType::SF2 => {
 							self.data = Vec::with_capacity(len + 1);
 							for i in 0..len as usize {
-								self.data.push(i16::from_le_bytes([data8[2 * i], data8[2 * i + 1]]));
+								self.data
+									.push(i16::from_le_bytes([data8[2 * i], data8[2 * i + 1]]));
 							}
 						}
 						FileType::SF3 => {
@@ -953,7 +954,8 @@ impl SoundFont {
 			if end <= start {
 				return Err(OpenError::BadSoundFont(format!(
 					"sample starts at {}, and ends before then (at {})",
-					start, end as i64 - 1
+					start,
+					end as i64 - 1
 				)));
 			}
 			let mut startloop = read_u32(&mut file)?;

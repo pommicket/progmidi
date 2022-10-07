@@ -45,7 +45,13 @@ fn pm_control_changed(channel, controller, value) {
 	}
 }
 
-pm_load_soundfont("soundfont.sf3");
-pm_load_preset(-1, "grand piano"); // default = piano
-pm_load_preset(9, "standard"); // drum pad
-pm_load_preset(16, "standard"); // metronome
+fn pm_start() {
+	pm_print("Loading soundfont...");
+	let start = pm_get_time();
+	pm_load_soundfont("soundfont.sf3");
+	pm_load_preset(-1, "grand piano"); // default = piano
+	pm_load_preset(9, "standard"); // drum pad
+	pm_load_preset(16, "standard"); // metronome
+	let load_time = pm_get_time() - start;
+	print("\rLoaded in " + load_time + "ms.                 ");
+}

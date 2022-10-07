@@ -48,6 +48,8 @@ starting with `pm_` or `PM_`.
 Below, `i64` is an integer, and `f64` is a floating-point number (number with decimals).
 `bool`s are either `true` or `false`.
 
+You can keep track of state between function calls using `this` (see `examples/fun.rhai`).
+
 ### user-supplied constants
 
 - `PM_DEVICE_ID: i64` - define this to control which MIDI device is used.
@@ -56,6 +58,8 @@ to use when you run progmidi. If this is 0, the default device
 will be used. Otherwise, the device with ID `PM_DEVICE_ID` will be used.
 
 ### user-supplied functions
+
+- `pm_start()` - called when progmidi is started.
 
 - `pm_note_played(channel: i64, note: i64, velocity: i64)` - Called
 when a note is played (MIDI "note on" event, or "note on" with velocity 0).
@@ -117,6 +121,10 @@ If `falloff` = 1, the note's volume is not affected when it is released.
 - `pm_start_midi_recording()` - Start a .wav recording.
 
 - `pm_stop_midi_recording()` - Stop the current .wav recording if there is one. 
+
+- `pm_print()` - `print` with no added newline.
+
+- `pm_get_time() -> i64` - get timestamp in milliseconds since application was started.
 
 ## building from source
 
