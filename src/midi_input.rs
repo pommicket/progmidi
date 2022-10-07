@@ -654,9 +654,9 @@ impl Device {
 				// in theory, this find() should always succeed
 				let result = queues.iter_mut().find(|(hmi, _)| *hmi == self.hmi);
 				if let Some((_, vec)) = result {
-					for i in 0..buffer.len() {
+					for (i, out) in buffer.iter_mut().enumerate() {
 						match vec.pop_front() {
-							Some(x) => buffer[i] = x,
+							Some(x) => *out = x,
 							None => return i,
 						}
 					}

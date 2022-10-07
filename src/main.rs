@@ -316,14 +316,13 @@ fn get_audio_stream() -> Result<(cpal::Stream, u32), String> {
 		.supported_output_configs()
 		.expect("error while querying configs");
 	let mut chosen_config = None;
-	
+
 	// get audio configuration with 2-channel float audio,
 	// and as close to 44100Hz sample rate as possible.
 	let desired_srate = 44100;
 	let best_dist = u32::MAX;
 	for config in supported_configs {
-		if config.channels() != 2
-			|| config.sample_format() != cpal::SampleFormat::F32 {
+		if config.channels() != 2 || config.sample_format() != cpal::SampleFormat::F32 {
 			continue;
 		}
 		let min_srate = config.min_sample_rate().0;
@@ -343,7 +342,7 @@ fn get_audio_stream() -> Result<(cpal::Stream, u32), String> {
 		None => return Err("Couldn't get desired audio properties.".to_string()),
 		Some(x) => x,
 	};
-	
+
 	let srate = {
 		let min_srate = chosen_config.min_sample_rate().0;
 		let max_srate = chosen_config.max_sample_rate().0;
@@ -355,7 +354,7 @@ fn get_audio_stream() -> Result<(cpal::Stream, u32), String> {
 			desired_srate
 		}
 	};
-	
+
 	let supp_config: cpal::SupportedStreamConfig =
 		chosen_config.with_sample_rate(cpal::SampleRate(srate));
 	let config = supp_config.into();
@@ -709,9 +708,9 @@ extern "C" fn sig_handler(_signum: c_int) {
 	});
 }
 
-fn main() {
+fn progmidi_main() {
 	unsafe { signal(SIGINT, sig_handler) };
-	
+
 	let application_start = Instant::now();
 
 	let mut engine = rhai::Engine::new();
@@ -751,12 +750,15 @@ fn main() {
 		}
 	});
 	engine.register_fn("pm_get_time", move || -> i64 {
-		Instant::now().duration_since(application_start)
+		Instant::now()
+			.duration_since(application_start)
 			.as_millis()
 			.try_into()
-			.expect("i'm gonna stop you right there. you've been running this program for HOW LONG?")
+			.expect(
+				"i'm gonna stop you right there. you've been running this program for HOW LONG?",
+			)
 	});
-	
+
 	let engine = engine; // de-multablify
 	let args: Vec<String> = std::env::args().collect();
 	let config_filename = match args.len() {
@@ -805,7 +807,7 @@ fn main() {
 			}
 		};
 	}
-	
+
 	let (stream, sample_rate) = match get_audio_stream() {
 		Ok(s) => s,
 		Err(e) => {
@@ -819,7 +821,6 @@ fn main() {
 		note_info.output_sample_rate = sample_rate;
 	}
 
-	
 	let mut this = rhai::Dynamic::from(rhai::Map::new());
 	call_fn_if_exists(&engine, &ast, &mut this, "pm_start", ());
 
@@ -862,7 +863,13 @@ fn main() {
 				),
 				PitchBend { channel, amount } => {
 					let amount = (amount as f64 - 8192.0) * (1.0 / 8192.0);
-					call_fn_if_exists(&engine, &ast, &mut this, "pm_pitch_bent", (channel as i64, amount));
+					call_fn_if_exists(
+						&engine,
+						&ast,
+						&mut this,
+						"pm_pitch_bent",
+						(channel as i64, amount),
+					);
 				}
 				ControlChange {
 					channel,
@@ -885,5 +892,19 @@ fn main() {
 			midi_device.clear_error();
 		}
 		std::thread::sleep(Duration::from_millis(1));
+	}
+}
+
+fn main() {
+	progmidi_main();
+	#[cfg(windows)]
+	{
+		// prevent terminal window from immediately closing on error
+		print!("Press enter to exit...");
+		flush_stdout();
+		let mut line = String::new();
+		if std::io::stdin().read_line(&mut line).is_err() {
+			// who cares
+		}
 	}
 }

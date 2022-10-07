@@ -8,3 +8,6 @@ scratch
 *.wav
 *.sf2
 *.sf3
+*.zip
+*.tar.gz
+progmidi
