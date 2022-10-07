@@ -71,7 +71,7 @@ when a note is released (MIDI "note off" event). `note` and `channel` are as in 
 `velocity` (0 to 127) indicates how forcefully the note was released.
 For most keyboards, the `velocity` is always just 0, so it can be ignored.
 
-- `pm_pitch_bent(amount: f32)` - Called when the pitch wheel
+- `pm_pitch_bent(amount: f64)` - Called when the pitch wheel
 is changed. `amount` ranges from -1 to 1.
 
 - `pm_control_changed(channel: i64, controller: i64, value: i64)` - Called
@@ -114,11 +114,11 @@ If `falloff` = 1, the note's volume is not affected when it is released.
 
 - `pm_stop_midi_recording()` - Stop the current .mid recording if there is one. 
 
-- `pm_start_midi_recording()` - Start a .wav recording.
+- `pm_start_wav_recording()` - Start a .wav recording.
 
-- `pm_stop_midi_recording()` - Stop the current .wav recording if there is one. 
+- `pm_stop_wav_recording()` - Stop the current .wav recording if there is one. 
 
-- `pm_print()` - `print` with no added newline.
+- `pm_print(s: string)` - `print` with no added newline.
 
 - `pm_get_time() -> i64` - get timestamp in milliseconds since application was started.
 
