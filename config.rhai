@@ -27,7 +27,8 @@ fn pm_control_changed(channel, controller, value) {
 			bpm = round(30.0 + 1.5 * value);
 		}
 		print("setting metronome to " + bpm.to_int());
-		pm_set_metronome(60, bpm, 1.5);
+		pm_set_volume(16, 1.5);
+		pm_set_metronome(60, bpm);
 	} else if controller == 50 {
 		// start/stop .wav recording
 		if value == 127 {
