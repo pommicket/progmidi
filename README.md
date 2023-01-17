@@ -1,6 +1,6 @@
 # progmidi
 
-A programmable MIDI keyboard-controlled audio synthesizer.
+A simple programmable MIDI keyboard-controlled soundfont player.
 
 Check out the [releases](https://github.com/pommicket/progmidi/releases)
 for Windows and Linux executables.

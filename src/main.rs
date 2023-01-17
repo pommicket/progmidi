@@ -862,7 +862,7 @@ fn progmidi_main() {
 					(channel as i64, note as i64, vel as i64),
 				),
 				PitchBend { channel, amount } => {
-					let amount = (amount as f64 - 8192.0) * (1.0 / 8192.0);
+					let amount = amount as f64 / 8192.0;
 					call_fn_if_exists(
 						&engine,
 						&ast,
